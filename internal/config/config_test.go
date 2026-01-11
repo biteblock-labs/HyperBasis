@@ -30,6 +30,9 @@ func TestStrategyEntryDefaults(t *testing.T) {
 	if cfg.Strategy.EntryPollInterval <= 0 {
 		t.Fatalf("expected entry poll interval default, got %v", cfg.Strategy.EntryPollInterval)
 	}
+	if cfg.Strategy.MinExposureUSD <= 0 {
+		t.Fatalf("expected min exposure default, got %v", cfg.Strategy.MinExposureUSD)
+	}
 }
 
 func TestValidateRequiresPerpAsset(t *testing.T) {

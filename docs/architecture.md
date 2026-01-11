@@ -26,6 +26,7 @@
 ## Data and Control Flow
 - Startup:
   - REST reconcile (spot balances, perp positions, open orders).
+  - Load the persisted strategy snapshot and restore the state machine based on last action + current exposure.
   - Start WS subscriptions for market data and account state.
 - Runtime:
   - Strategy tick reads mid price, funding, volatility.
@@ -68,8 +69,8 @@ sequenceDiagram
 ## Restart Safety
 - The state store persists client order IDs to prevent duplicate order placement.
 - Exchange nonces are persisted in SQLite to avoid reuse after restarts.
+- A strategy snapshot (last action + exposure + last mids) is persisted in SQLite and loaded on startup to restore the state machine (avoids getting stuck in IDLE with exposure after restarts and supports dust-aware flatness checks).
 - On startup, the app reconciles exposure and open orders before trading.
-- Roadmap includes persisting last action and exposure to harden recovery.
 
 ## Trading Prerequisites (Operational Notes)
 - Spot orders require sufficient funds in the spot wallet (`spotClearinghouseState`); deposits may first appear under `clearinghouseState` and need to be transferred to spot.
@@ -82,6 +83,7 @@ sequenceDiagram
 ## Configuration
 - `internal/config/config.yaml` includes endpoints, timeouts, strategy thresholds, and risk limits.
 - Config defaults are applied in `internal/config/config.go`.
+- `strategy.min_exposure_usd` treats small residual exposure as dust to avoid tiny exit orders.
 - `ws.ping_interval` keeps WebSocket connections alive to avoid idle disconnects.
 
 ## Dependencies

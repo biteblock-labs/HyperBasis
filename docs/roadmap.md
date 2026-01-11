@@ -33,6 +33,7 @@ WebSocket (wss://api.hyperliquid.xyz/ws):
 - `clearinghouseState` (perp positions/margin)
 - `userFills` (fills for your orders)
 - `candle` (volatility filter)
+- `method: "post"` `/info`: `spotClearinghouseState` (spot balances)
 
 ## Architecture Overview
 Core modules and responsibilities:
@@ -41,7 +42,7 @@ Core modules and responsibilities:
 - Execution (`internal/exec`): order placement/cancel with idempotency and retries.
 - RiskEngine (`internal/strategy/risk.go`): delta band, margin buffer, funding regime.
 - StateMachine (`internal/strategy`): single source of truth for flow state.
-- Store (`internal/state/sqlite`): restart-safe state + last action.
+- Store (`internal/state/sqlite`): restart-safe KV (executor idempotency, exchange nonces, strategy snapshot).
 - Logging/Metrics/Alerts (`internal/logging`, `internal/metrics`, `internal/alerts`).
 
 ## State Machine (Restart-Safe)
@@ -62,14 +63,16 @@ ENTER flow:
 - If either leg fails to fill quickly: cancel outstanding orders, revert to flat, return to IDLE.
 
 HEDGE_OK flow:
-- Enforce delta neutral band, rebalance with small perp adjustments.
-- Enforce margin buffer, reduce or exit if health degrades.
-- Exit on funding deterioration or expected carry < fees + buffer.
+- Current: hold position and exit on funding deterioration (no delta-band re-hedging yet).
+- Phase 4: enforce delta neutral band, rebalance with small perp adjustments.
+- Phase 4: enforce margin buffer, reduce or exit if health degrades.
+- Phase 4: exit on expected carry < fees + buffer.
 
 EXIT flow:
-- Reduce-only close perp short.
-- Sell spot back to quote asset.
-- Confirm flat, return to IDLE.
+- Size from actual spot/perp exposure (not notional); skip legs below `strategy.min_exposure_usd` to avoid dust/tiny orders.
+- Close spot exposure (sell if long / buy if short) and wait for fill (cancel on timeout).
+- Close perp exposure with reduce-only (buy if short / sell if long) and wait for fill (cancel on timeout).
+- On partial/no-fill: cancel best-effort, roll back any filled spot to restore delta, return to HEDGE_OK; otherwise confirm flat (dust-aware) and return to IDLE.
 
 ## Restart Safety
 On startup, always reconcile:
@@ -78,8 +81,9 @@ On startup, always reconcile:
 - Open orders (`openOrders`).
 
 Exchange nonces are persisted in SQLite to avoid reuse after restarts.
+The last strategy action and exposure (plus last mid prices) are persisted as a strategy snapshot and loaded on startup to restore the state machine.
 
-If exposure exists: enter HEDGE_OK and fix delta.
+If exposure exists: enter HEDGE_OK (delta-band re-hedging is a Phase 4 item; current behavior mostly holds or exits).
 If orders exist but no exposure: cancel.
 If exposure exists and funding is bad: exit.
 
@@ -100,6 +104,7 @@ If exposure exists and funding is bad: exit.
 - [x] Asset IDs: perp uses universe index and spot uses 10000 + spot index (implemented per docs).
 - [x] Signed `/exchange` order action verified on mainnet with a tiny spot IOC fill.
 - [x] Exchange constraints observed: minimum order value (10 USDC) and tick-size enforcement for price formatting.
+- [x] Dust handling: skip exits below `strategy.min_exposure_usd` to avoid tiny orders / 422s.
 - [x] Funds placement matters: spot orders require spot wallet funds (`spotClearinghouseState`); perp wallet funds appear under `clearinghouseState`.
 - [x] Partial fills: reconcile fills via WS events or user fills; hedge only the executed size; consider IOC for spot to avoid lingering partials.
 - [x] Exchange nonces persist in SQLite to avoid reuse on restart.
@@ -117,13 +122,15 @@ If exposure exists and funding is bad: exit.
 - [x] Phase 2 (REST): Parse spot balances, perp positions, and open orders from /info.
 - [x] Phase 2 (WS): Parse perp/open-order updates from WebSocket feeds.
 - [x] Phase 2 (WS): Parse user fills feed for order fill tracking.
-- [ ] Phase 2 (WS): Parse spot wallet updates from WebSocket feeds.
+- [x] Phase 2 (WS): Spot balances via WS post snapshots (`spotClearinghouseState`).
+- [ ] Phase 2 (WS): Spot balance deltas via `userNonFundingLedgerUpdates`.
 - [x] Phase 2: Persist exchange nonces in SQLite for restart safety.
-- [ ] Phase 2: Persist last action and exposure in SQLite for restart safety.
+- [x] Phase 2: Persist last action and exposure in SQLite for restart safety.
 - [x] Phase 2: Add signed /exchange order action (EIP-712) and CLI verification order.
 - [x] Phase 2: Support USDC class transfers between perp/spot (needed to fund spot buys without draining perp margin).
-- [x] Phase 3: Add order timeouts, cancel-on-timeout, and rollback on partial fills.
-- [ ] Phase 3: Enforce reduce-only on exit.
+- [x] Phase 3: Add ENTER/EXIT timeouts, cancel-on-timeout, and rollback on partial fills.
+- [x] Phase 3: Enforce reduce-only on exit.
+- [x] Phase 3: Add dust threshold (`strategy.min_exposure_usd`) to avoid tiny exit orders.
 - [ ] Phase 4: Delta band checks, margin buffer thresholds, connectivity kill switch.
 - [ ] Phase 4: Funding regime rules and expected carry estimation.
 - [ ] Phase 5: Expand structured logging fields.

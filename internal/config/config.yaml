@@ -1,5 +1,5 @@
 log:
-  level: debug
+  level: info
 
 rest:
   base_url: https://api.hyperliquid.xyz
@@ -19,6 +19,7 @@ strategy:
   notional_usd: 1000
   min_funding_rate: 0.0002
   max_volatility: 0.02
+  min_exposure_usd: 10
   entry_interval: 30s
   entry_timeout: 5s
   entry_poll_interval: 250ms

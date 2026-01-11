@@ -63,3 +63,74 @@ func TestClientSendsPing(t *testing.T) {
 		t.Fatalf("timed out waiting for ping")
 	}
 }
+
+func TestClientPostRequest(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept ws: %v", err)
+			return
+		}
+		defer func() { _ = conn.Close(websocket.StatusNormalClosure, "") }()
+		_, data, err := conn.Read(ctx)
+		if err != nil {
+			return
+		}
+		var msg map[string]any
+		if err := json.Unmarshal(data, &msg); err != nil {
+			return
+		}
+		id, _ := msg["id"].(float64)
+		resp := map[string]any{
+			"channel": "post",
+			"data": map[string]any{
+				"id": uint64(id),
+				"response": map[string]any{
+					"type": "info",
+					"payload": map[string]any{
+						"type": "spotClearinghouseState",
+						"data": map[string]any{
+							"balances": []any{},
+						},
+					},
+				},
+			},
+		}
+		payload, _ := json.Marshal(resp)
+		_ = conn.Write(ctx, websocket.MessageText, payload)
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	client := New(wsURL, 10*time.Millisecond, 0, zap.NewNop())
+	if err := client.Connect(ctx); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+
+	runCtx, runCancel := context.WithCancel(ctx)
+	defer runCancel()
+	go func() {
+		_ = client.Run(runCtx, nil)
+	}()
+
+	resp, err := client.Post(ctx, 42, map[string]any{
+		"type": "info",
+		"payload": map[string]any{
+			"type": "spotClearinghouseState",
+			"user": "0xabc",
+		},
+	})
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(resp, &got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got["channel"] != "post" {
+		t.Fatalf("expected post channel, got %v", got["channel"])
+	}
+}

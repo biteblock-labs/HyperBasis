@@ -248,6 +248,20 @@ func TestUserFillsAggregationAndDedupe(t *testing.T) {
 	}
 }
 
+func TestParseSpotBalancesPost(t *testing.T) {
+	raw := []byte(`{"channel":"post","data":{"id":101,"response":{"type":"info","payload":{"type":"spotClearinghouseState","data":{"balances":[{"coin":"USDC","total":"14.5"},{"coin":"UBTC","total":"0.01"}]}}}}}`)
+	balances, err := parseSpotBalancesPost(raw)
+	if err != nil {
+		t.Fatalf("parse spot balances post: %v", err)
+	}
+	if balances["USDC"] != 14.5 {
+		t.Fatalf("expected USDC 14.5, got %f", balances["USDC"])
+	}
+	if balances["UBTC"] != 0.01 {
+		t.Fatalf("expected UBTC 0.01, got %f", balances["UBTC"])
+	}
+}
+
 func TestUserFillsEvictsOldOrderIDs(t *testing.T) {
 	acct := &Account{log: zap.NewNop()}
 	fills := make([]any, 0, maxFillOrderIDs+1)

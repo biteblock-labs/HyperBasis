@@ -18,6 +18,12 @@ func (s *StateMachine) Apply(event Event) State {
 	return s.State
 }
 
+func (s *StateMachine) SetState(state State) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.State = state
+}
+
 func nextState(current State, event Event) State {
 	switch current {
 	case StateIdle:

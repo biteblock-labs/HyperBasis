@@ -20,6 +20,9 @@ type Client struct {
 	mu   sync.Mutex
 	conn *websocket.Conn
 	subs []interface{}
+
+	postMu  sync.Mutex
+	postReq map[uint64]chan json.RawMessage
 }
 
 func New(url string, reconnectDelay, pingInterval time.Duration, log *zap.Logger) *Client {
@@ -109,6 +112,9 @@ func (c *Client) readLoop(ctx context.Context, handler func(json.RawMessage)) er
 		if err != nil {
 			return err
 		}
+		if c.handlePostResponse(data) {
+			continue
+		}
 		if handler != nil {
 			handler(json.RawMessage(data))
 		}
@@ -160,6 +166,91 @@ func (c *Client) resetConn() {
 	if c.conn != nil {
 		_ = c.conn.Close(websocket.StatusNormalClosure, "reset")
 		c.conn = nil
+	}
+}
+
+func (c *Client) Post(ctx context.Context, id uint64, req interface{}) (json.RawMessage, error) {
+	if id == 0 {
+		return nil, errors.New("post id is required")
+	}
+	if err := c.Connect(ctx); err != nil {
+		return nil, err
+	}
+	c.mu.Lock()
+	conn := c.conn
+	c.mu.Unlock()
+	if conn == nil {
+		return nil, errors.New("ws not connected")
+	}
+	respCh := make(chan json.RawMessage, 1)
+	c.postMu.Lock()
+	if c.postReq == nil {
+		c.postReq = make(map[uint64]chan json.RawMessage)
+	}
+	if _, exists := c.postReq[id]; exists {
+		c.postMu.Unlock()
+		return nil, errors.New("post id already in use")
+	}
+	c.postReq[id] = respCh
+	c.postMu.Unlock()
+
+	payload := map[string]any{
+		"method":  "post",
+		"id":      id,
+		"request": req,
+	}
+	if err := writeJSON(ctx, conn, payload); err != nil {
+		c.removePostWaiter(id)
+		return nil, err
+	}
+	select {
+	case resp := <-respCh:
+		return resp, nil
+	case <-ctx.Done():
+		c.removePostWaiter(id)
+		return nil, ctx.Err()
+	}
+}
+
+func (c *Client) handlePostResponse(data []byte) bool {
+	c.postMu.Lock()
+	hasPending := len(c.postReq) > 0
+	c.postMu.Unlock()
+	if !hasPending {
+		return false
+	}
+	var payload struct {
+		Channel string `json:"channel"`
+		Data    struct {
+			ID uint64 `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return false
+	}
+	if payload.Channel != "post" || payload.Data.ID == 0 {
+		return false
+	}
+	c.postMu.Lock()
+	waiter, ok := c.postReq[payload.Data.ID]
+	if ok {
+		delete(c.postReq, payload.Data.ID)
+	}
+	c.postMu.Unlock()
+	if !ok {
+		return false
+	}
+	waiter <- json.RawMessage(data)
+	close(waiter)
+	return true
+}
+
+func (c *Client) removePostWaiter(id uint64) {
+	c.postMu.Lock()
+	defer c.postMu.Unlock()
+	if waiter, ok := c.postReq[id]; ok {
+		delete(c.postReq, id)
+		close(waiter)
 	}
 }
 

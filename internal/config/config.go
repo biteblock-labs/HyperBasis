@@ -44,6 +44,7 @@ type StrategyConfig struct {
 	NotionalUSD       float64       `yaml:"notional_usd"`
 	MinFundingRate    float64       `yaml:"min_funding_rate"`
 	MaxVolatility     float64       `yaml:"max_volatility"`
+	MinExposureUSD    float64       `yaml:"min_exposure_usd"`
 	EntryInterval     time.Duration `yaml:"entry_interval"`
 	EntryTimeout      time.Duration `yaml:"entry_timeout"`
 	EntryPollInterval time.Duration `yaml:"entry_poll_interval"`
@@ -104,6 +105,9 @@ func applyDefaults(cfg *Config) {
 	if cfg.Strategy.EntryInterval == 0 {
 		cfg.Strategy.EntryInterval = 30 * time.Second
 	}
+	if cfg.Strategy.MinExposureUSD == 0 {
+		cfg.Strategy.MinExposureUSD = 10
+	}
 	if cfg.Strategy.EntryTimeout == 0 {
 		cfg.Strategy.EntryTimeout = 5 * time.Second
 	}
@@ -143,6 +147,9 @@ func validate(cfg *Config) error {
 	}
 	if cfg.Strategy.EntryPollInterval <= 0 {
 		return errors.New("strategy.entry_poll_interval must be > 0")
+	}
+	if cfg.Strategy.MinExposureUSD < 0 {
+		return errors.New("strategy.min_exposure_usd must be >= 0")
 	}
 	if cfg.Risk.MaxNotionalUSD > 0 && cfg.Strategy.NotionalUSD > cfg.Risk.MaxNotionalUSD {
 		return errors.New("strategy.notional_usd exceeds risk.max_notional_usd")

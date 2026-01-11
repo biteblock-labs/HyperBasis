@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"hl-carry-bot/internal/hl/rest"
 	"hl-carry-bot/internal/hl/ws"
@@ -34,7 +35,9 @@ type Account struct {
 	seenFillOrder          []string
 	hasOpenOrdersSnapshot  bool
 	hasPerpStateSnapshot   bool
+	hasSpotStateSnapshot   bool
 	lastClearinghouseState map[string]any
+	spotPostID             atomic.Uint64
 }
 
 const (
@@ -80,6 +83,7 @@ func (a *Account) Reconcile(ctx context.Context) (*State, error) {
 	a.openOrders = openOrdersMap(state.OpenOrders)
 	a.hasOpenOrdersSnapshot = true
 	a.hasPerpStateSnapshot = true
+	a.hasSpotStateSnapshot = true
 	a.lastClearinghouseState = perp
 	a.mu.Unlock()
 	return &state, nil
@@ -316,12 +320,19 @@ func (a *Account) applyUserFillsUpdate(data any) {
 }
 
 func parseBalances(payload map[string]any) map[string]float64 {
-	balances := make(map[string]float64)
 	if payload == nil {
-		return balances
+		return make(map[string]float64)
 	}
 	raw, ok := payload["balances"].([]any)
-	if !ok || len(raw) == 0 {
+	if !ok {
+		return make(map[string]float64)
+	}
+	return parseBalanceEntries(raw)
+}
+
+func parseBalanceEntries(raw []any) map[string]float64 {
+	balances := make(map[string]float64)
+	if len(raw) == 0 {
 		return balances
 	}
 	for _, item := range raw {
@@ -353,6 +364,95 @@ func parseBalances(payload map[string]any) map[string]float64 {
 		}
 	}
 	return balances
+}
+
+func parseSpotBalances(data any) map[string]float64 {
+	if data == nil {
+		return nil
+	}
+	switch payload := data.(type) {
+	case map[string]any:
+		if _, ok := payload["balances"]; ok {
+			return parseBalances(payload)
+		}
+		if nested, ok := payload["data"]; ok {
+			return parseSpotBalances(nested)
+		}
+	case []any:
+		return parseBalanceEntries(payload)
+	}
+	return nil
+}
+
+func (a *Account) RefreshSpotBalancesWS(ctx context.Context) error {
+	if a.ws == nil {
+		return nil
+	}
+	if a.user == "" {
+		return errors.New("account user is required")
+	}
+	req := map[string]any{
+		"type": "info",
+		"payload": map[string]any{
+			"type": "spotClearinghouseState",
+			"user": a.user,
+		},
+	}
+	postID := a.spotPostID.Add(1)
+	raw, err := a.ws.Post(ctx, postID, req)
+	if err != nil {
+		return err
+	}
+	balances, err := parseSpotBalancesPost(raw)
+	if err != nil {
+		return err
+	}
+	if balances == nil {
+		return nil
+	}
+	a.mu.Lock()
+	a.state.SpotBalances = balances
+	a.hasSpotStateSnapshot = true
+	if a.state.LastRawUpdate == nil {
+		a.state.LastRawUpdate = make(map[string]any)
+	}
+	a.state.LastRawUpdate["ws_post_spot_clearinghouse"] = map[string]any{"id": postID}
+	a.mu.Unlock()
+	return nil
+}
+
+func parseSpotBalancesPost(raw json.RawMessage) (map[string]float64, error) {
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return nil, err
+	}
+	channel := stringFromAny(payload["channel"])
+	if channel != "post" {
+		return nil, fmt.Errorf("unexpected post channel %q", channel)
+	}
+	data, ok := payload["data"].(map[string]any)
+	if !ok {
+		return nil, errors.New("post data missing")
+	}
+	response, ok := data["response"].(map[string]any)
+	if !ok {
+		return nil, errors.New("post response missing")
+	}
+	if stringFromAny(response["type"]) == "error" {
+		return nil, fmt.Errorf("post error: %s", stringFromAny(response["payload"]))
+	}
+	payloadMap, ok := response["payload"].(map[string]any)
+	if !ok {
+		return nil, errors.New("post payload missing")
+	}
+	if typ := stringFromAny(payloadMap["type"]); typ != "spotClearinghouseState" {
+		return nil, fmt.Errorf("unexpected post payload type %q", typ)
+	}
+	balances := parseSpotBalances(payloadMap["data"])
+	if balances == nil {
+		return nil, errors.New("spot balances missing")
+	}
+	return balances, nil
 }
 
 func parsePositions(payload map[string]any) map[string]float64 {

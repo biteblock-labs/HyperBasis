@@ -28,12 +28,14 @@ func main() {
 		panic(err)
 	}
 	log := logging.New(cfg.Log)
+	log.Info("config loaded", zap.String("path", *configPath))
 
 	application, err := app.New(cfg, log)
 	if err != nil {
 		log.Error("failed to initialize app", zap.Error(err))
 		os.Exit(1)
 	}
+	log.Info("app initialized")
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

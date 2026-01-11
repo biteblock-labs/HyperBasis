@@ -33,3 +33,11 @@ func TestStateMachineInvalidTransition(t *testing.T) {
 		t.Fatalf("invalid transition should not change state")
 	}
 }
+
+func TestStateMachineSetState(t *testing.T) {
+	sm := NewStateMachine()
+	sm.SetState(StateHedgeOK)
+	if sm.State != StateHedgeOK {
+		t.Fatalf("expected %s, got %s", StateHedgeOK, sm.State)
+	}
+}
