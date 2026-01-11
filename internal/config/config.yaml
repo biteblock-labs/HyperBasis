@@ -1,0 +1,32 @@
+log:
+  level: info
+
+rest:
+  base_url: https://api.hyperliquid.xyz
+  timeout: 10s
+
+ws:
+  url: wss://api.hyperliquid.xyz/ws
+  reconnect_delay: 3s
+
+state:
+  sqlite_path: data/hl-carry-bot.db
+
+strategy:
+  asset: BTC
+  notional_usd: 1000
+  min_funding_rate: 0.0002
+  max_volatility: 0.02
+  entry_interval: 30s
+  exit_on_funding_dip: true
+  candle_interval: 1h
+  candle_window: 24
+
+risk:
+  max_notional_usd: 5000
+  max_open_orders: 10
+
+telegram:
+  enabled: false
+  token: ""
+  chat_id: ""
