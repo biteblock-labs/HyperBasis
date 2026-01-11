@@ -1,6 +1,7 @@
 package account
 
 import (
+	"container/list"
 	"context"
 	"encoding/json"
 	"errors"
@@ -27,7 +28,8 @@ type Account struct {
 	openOrders             map[string]map[string]any
 	fillsEnabled           bool
 	fillsByOrderID         map[string]float64
-	fillOrderIDs           []string
+	fillOrderList          *list.List
+	fillOrderElem          map[string]*list.Element
 	seenFillKeys           map[string]struct{}
 	seenFillOrder          []string
 	hasOpenOrdersSnapshot  bool
@@ -256,6 +258,12 @@ func (a *Account) applyUserFillsUpdate(data any) {
 	if a.fillsByOrderID == nil {
 		a.fillsByOrderID = make(map[string]float64)
 	}
+	if a.fillOrderList == nil {
+		a.fillOrderList = list.New()
+	}
+	if a.fillOrderElem == nil {
+		a.fillOrderElem = make(map[string]*list.Element)
+	}
 	if a.seenFillKeys == nil {
 		a.seenFillKeys = make(map[string]struct{})
 	}
@@ -275,8 +283,11 @@ func (a *Account) applyUserFillsUpdate(data any) {
 		}
 		a.seenFillKeys[key] = struct{}{}
 		a.seenFillOrder = append(a.seenFillOrder, key)
-		if _, ok := a.fillsByOrderID[fill.OrderID]; !ok {
-			a.fillOrderIDs = append(a.fillOrderIDs, fill.OrderID)
+		if elem, ok := a.fillOrderElem[fill.OrderID]; ok {
+			a.fillOrderList.MoveToBack(elem)
+		} else {
+			elem := a.fillOrderList.PushBack(fill.OrderID)
+			a.fillOrderElem[fill.OrderID] = elem
 		}
 		a.fillsByOrderID[fill.OrderID] += math.Abs(fill.Size)
 	}
@@ -287,15 +298,20 @@ func (a *Account) applyUserFillsUpdate(data any) {
 		}
 		a.seenFillOrder = a.seenFillOrder[len(a.seenFillOrder)-maxSeenFillKeys:]
 	}
-	if len(a.fillsByOrderID) > maxFillOrderIDs {
-		overflow := len(a.fillsByOrderID) - maxFillOrderIDs
-		if overflow > len(a.fillOrderIDs) {
-			overflow = len(a.fillOrderIDs)
+	for len(a.fillsByOrderID) > maxFillOrderIDs {
+		if a.fillOrderList == nil {
+			break
 		}
-		for i := 0; i < overflow; i++ {
-			delete(a.fillsByOrderID, a.fillOrderIDs[i])
+		front := a.fillOrderList.Front()
+		if front == nil {
+			break
 		}
-		a.fillOrderIDs = a.fillOrderIDs[overflow:]
+		orderID, ok := front.Value.(string)
+		a.fillOrderList.Remove(front)
+		if ok {
+			delete(a.fillOrderElem, orderID)
+			delete(a.fillsByOrderID, orderID)
+		}
 	}
 }
 

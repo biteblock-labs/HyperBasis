@@ -21,6 +21,7 @@ REST (POST https://api.hyperliquid.xyz/info):
 - Spot ctx: `spotMeta` and/or `spotMetaAndAssetCtxs`
 - Spot balances: `spotClearinghouseState` with user address
 - Open orders: `openOrders`
+- User fills: `userFillsByTime` (fallback)
 - Perp positions/margin: `clearinghouseState`
 
 REST (POST https://api.hyperliquid.xyz/exchange):
@@ -30,6 +31,7 @@ WebSocket (wss://api.hyperliquid.xyz/ws):
 - `allMids` (prices)
 - `openOrders` (your open orders)
 - `clearinghouseState` (perp positions/margin)
+- `userFills` (fills for your orders)
 - `candle` (volatility filter)
 
 ## Architecture Overview
@@ -75,6 +77,8 @@ On startup, always reconcile:
 - Perp positions (`clearinghouseState`).
 - Open orders (`openOrders`).
 
+Exchange nonces are persisted in SQLite to avoid reuse after restarts.
+
 If exposure exists: enter HEDGE_OK and fix delta.
 If orders exist but no exposure: cancel.
 If exposure exists and funding is bad: exit.
@@ -98,6 +102,7 @@ If exposure exists and funding is bad: exit.
 - [x] Exchange constraints observed: minimum order value (10 USDC) and tick-size enforcement for price formatting.
 - [x] Funds placement matters: spot orders require spot wallet funds (`spotClearinghouseState`); perp wallet funds appear under `clearinghouseState`.
 - [x] Partial fills: reconcile fills via WS events or user fills; hedge only the executed size; consider IOC for spot to avoid lingering partials.
+- [x] Exchange nonces persist in SQLite to avoid reuse on restart.
 - [ ] Funding timing: confirm hourly funding schedule and next funding timestamp; avoid closing right before a positive funding event unless risk dictates.
 - [ ] Funding data sources: verify availability and schema for `predictedFundings` and `userFunding` before relying on them.
 - [ ] Fees and slippage: compute expected carry net of fees/spread before entry; avoid churn when funding is low.
@@ -111,7 +116,9 @@ If exposure exists and funding is bad: exit.
 - [x] Phase 1: Implement candle volatility feed and calculations (tune window/interval as needed).
 - [x] Phase 2 (REST): Parse spot balances, perp positions, and open orders from /info.
 - [x] Phase 2 (WS): Parse perp/open-order updates from WebSocket feeds.
+- [x] Phase 2 (WS): Parse user fills feed for order fill tracking.
 - [ ] Phase 2 (WS): Parse spot wallet updates from WebSocket feeds.
+- [x] Phase 2: Persist exchange nonces in SQLite for restart safety.
 - [ ] Phase 2: Persist last action and exposure in SQLite for restart safety.
 - [x] Phase 2: Add signed /exchange order action (EIP-712) and CLI verification order.
 - [x] Phase 2: Support USDC class transfers between perp/spot (needed to fund spot buys without draining perp margin).

@@ -12,10 +12,10 @@
 - `internal/config`: config schema, defaults, validation, YAML loader.
 - `internal/logging`: zap logger setup.
 - `internal/hl/rest`: REST client for `POST /info` (unauthenticated) and generic JSON helpers.
-- `internal/hl/exchange`: signed `/exchange` client (msgpack + EIP-712), matches official SDK behavior.
+- `internal/hl/exchange`: signed `/exchange` client (msgpack + EIP-712) with monotonic nonces and SQLite persistence.
 - `internal/hl/ws`: WebSocket client with reconnect/resubscribe logic.
 - `internal/market`: market data abstraction (REST + WS) for mids/funding/vol.
-- `internal/account`: account reconciliation for spot balances, perp positions, open orders.
+- `internal/account`: account reconciliation for spot balances, perp positions, open orders, and fill tracking.
 - `internal/exec`: order placement/cancel, idempotency, retries with backoff.
 - `internal/strategy`: state machine, types, and risk checks.
 - `internal/state`: persistent store interface; SQLite implementation.
@@ -67,6 +67,7 @@ sequenceDiagram
 
 ## Restart Safety
 - The state store persists client order IDs to prevent duplicate order placement.
+- Exchange nonces are persisted in SQLite to avoid reuse after restarts.
 - On startup, the app reconciles exposure and open orders before trading.
 - Roadmap includes persisting last action and exposure to harden recovery.
 

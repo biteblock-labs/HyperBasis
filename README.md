@@ -39,6 +39,7 @@ The bot wires configuration + logging, reconciles account state at startup, cons
 - REST endpoints: `POST /info` and `POST /exchange`
 - WS endpoint: `wss://api.hyperliquid.xyz/ws`
 - WS keepalive: configure `ws.ping_interval` to avoid idle disconnects (default 50s).
+- Exchange nonces are persisted in SQLite to avoid reuse after restarts (startup logs nonce key/seed).
 - Placeholder types are used where schemas are unknown.
 
 ## Testing

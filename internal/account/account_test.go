@@ -2,6 +2,7 @@ package account
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"strconv"
 	"testing"
@@ -270,5 +271,54 @@ func TestUserFillsEvictsOldOrderIDs(t *testing.T) {
 	lastID := strconv.Itoa(maxFillOrderIDs)
 	if got := acct.FillSize(lastID); got == 0 {
 		t.Fatalf("expected last order %s to remain, got fill %f", lastID, got)
+	}
+}
+
+func TestUserFillsLRUEvictionKeepsActiveOrder(t *testing.T) {
+	acct := &Account{log: zap.NewNop()}
+	baseTime := int64(1700000000000)
+	fills := make([]any, 0, maxFillOrderIDs)
+	for i := 0; i < maxFillOrderIDs; i++ {
+		fills = append(fills, map[string]any{
+			"oid":  strconv.Itoa(i),
+			"coin": "BTC",
+			"side": "B",
+			"sz":   "1",
+			"px":   "30000",
+			"time": baseTime + int64(i),
+			"hash": fmt.Sprintf("h%d", i),
+		})
+	}
+	acct.applyUserFillsUpdate(map[string]any{"fills": fills})
+	acct.applyUserFillsUpdate(map[string]any{"fills": []any{
+		map[string]any{
+			"oid":  "0",
+			"coin": "BTC",
+			"side": "B",
+			"sz":   "1",
+			"px":   "30000",
+			"time": baseTime + 9999,
+			"hash": "h0b",
+		},
+	}})
+	acct.applyUserFillsUpdate(map[string]any{"fills": []any{
+		map[string]any{
+			"oid":  strconv.Itoa(maxFillOrderIDs),
+			"coin": "BTC",
+			"side": "B",
+			"sz":   "1",
+			"px":   "30000",
+			"time": baseTime + 10000,
+			"hash": "hnew",
+		},
+	}})
+	if got := acct.FillSize("0"); got == 0 {
+		t.Fatalf("expected active order 0 to remain")
+	}
+	if got := acct.FillSize("1"); got != 0 {
+		t.Fatalf("expected order 1 to be evicted, got fill %f", got)
+	}
+	if got := len(acct.fillsByOrderID); got != maxFillOrderIDs {
+		t.Fatalf("expected %d tracked orders, got %d", maxFillOrderIDs, got)
 	}
 }
