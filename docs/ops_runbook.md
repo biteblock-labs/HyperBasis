@@ -21,6 +21,7 @@ The repo is a scaffold with meaningful safety work, but it is not a “set and f
 
 Notable limitations (as of this repo state):
 - **EXIT flow is safer but not foolproof**: the bot sizes from actual exposure, skips dust below `strategy.min_exposure_usd`, waits for fills (cancel on timeout), closes the perp leg with reduce-only, and rolls back spot on failures/partial fills before marking the state done. If rollback fails, manual intervention may still be required.
+- **Spot balance tracking is snapshot+delta-based**: `userNonFundingLedgerUpdates` applies spot deltas and the bot periodically reconciles via `spotClearinghouseState` (tune `strategy.spot_reconcile_interval` as needed).
 - **Restart behavior is improved**: the bot persists a strategy snapshot (last action + exposure + last mids) to SQLite and restores the state machine on startup (including promoting IDLE → HEDGE_OK when exposure exists), but steady-state delta management is still minimal.
 - Risk checks are currently minimal (notional/open-orders) and do not yet include margin health, connectivity kill-switches, or fee-aware carry estimates.
 
@@ -77,6 +78,7 @@ Strategy settings:
 - `strategy.max_volatility`: volatility gate (from candle feed)
 - `strategy.min_exposure_usd`: treat smaller residuals as dust to avoid tiny exit orders / 422s
 - `strategy.entry_interval`: how often to evaluate entry/exit
+- `strategy.spot_reconcile_interval`: periodic spot balance refresh cadence (WS post `spotClearinghouseState`)
 - `strategy.entry_timeout` / `strategy.entry_poll_interval`: how long to wait for entry fills
 - `strategy.exit_on_funding_dip`: whether to exit when expected funding drops below threshold
 
@@ -86,7 +88,7 @@ Risk settings (currently enforced in code):
 
 Spot balance source:
 - `spotClearinghouseState` is an `/info` request (HTTP) and can also be called via WebSocket `method: "post"`. It is not a WS subscription type.
-- For live deltas, use `userNonFundingLedgerUpdates` + fills and periodically reconcile with `spotClearinghouseState`.
+- For live deltas, use `userNonFundingLedgerUpdates` (spot transfers/account-class transfers) + fills and periodically reconcile with `spotClearinghouseState` using `strategy.spot_reconcile_interval`.
 
 ## State / Data (`hl-carry-bot.db`)
 

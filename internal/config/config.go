@@ -38,19 +38,20 @@ type StateConfig struct {
 }
 
 type StrategyConfig struct {
-	Asset             string        `yaml:"asset"`
-	PerpAsset         string        `yaml:"perp_asset"`
-	SpotAsset         string        `yaml:"spot_asset"`
-	NotionalUSD       float64       `yaml:"notional_usd"`
-	MinFundingRate    float64       `yaml:"min_funding_rate"`
-	MaxVolatility     float64       `yaml:"max_volatility"`
-	MinExposureUSD    float64       `yaml:"min_exposure_usd"`
-	EntryInterval     time.Duration `yaml:"entry_interval"`
-	EntryTimeout      time.Duration `yaml:"entry_timeout"`
-	EntryPollInterval time.Duration `yaml:"entry_poll_interval"`
-	ExitOnFundingDip  bool          `yaml:"exit_on_funding_dip"`
-	CandleInterval    string        `yaml:"candle_interval"`
-	CandleWindow      int           `yaml:"candle_window"`
+	Asset                 string        `yaml:"asset"`
+	PerpAsset             string        `yaml:"perp_asset"`
+	SpotAsset             string        `yaml:"spot_asset"`
+	NotionalUSD           float64       `yaml:"notional_usd"`
+	MinFundingRate        float64       `yaml:"min_funding_rate"`
+	MaxVolatility         float64       `yaml:"max_volatility"`
+	MinExposureUSD        float64       `yaml:"min_exposure_usd"`
+	EntryInterval         time.Duration `yaml:"entry_interval"`
+	SpotReconcileInterval time.Duration `yaml:"spot_reconcile_interval"`
+	EntryTimeout          time.Duration `yaml:"entry_timeout"`
+	EntryPollInterval     time.Duration `yaml:"entry_poll_interval"`
+	ExitOnFundingDip      bool          `yaml:"exit_on_funding_dip"`
+	CandleInterval        string        `yaml:"candle_interval"`
+	CandleWindow          int           `yaml:"candle_window"`
 }
 
 type RiskConfig struct {
@@ -105,6 +106,9 @@ func applyDefaults(cfg *Config) {
 	if cfg.Strategy.EntryInterval == 0 {
 		cfg.Strategy.EntryInterval = 30 * time.Second
 	}
+	if cfg.Strategy.SpotReconcileInterval == 0 {
+		cfg.Strategy.SpotReconcileInterval = 5 * time.Minute
+	}
 	if cfg.Strategy.MinExposureUSD == 0 {
 		cfg.Strategy.MinExposureUSD = 10
 	}
@@ -150,6 +154,9 @@ func validate(cfg *Config) error {
 	}
 	if cfg.Strategy.MinExposureUSD < 0 {
 		return errors.New("strategy.min_exposure_usd must be >= 0")
+	}
+	if cfg.Strategy.SpotReconcileInterval < 0 {
+		return errors.New("strategy.spot_reconcile_interval must be >= 0")
 	}
 	if cfg.Risk.MaxNotionalUSD > 0 && cfg.Strategy.NotionalUSD > cfg.Risk.MaxNotionalUSD {
 		return errors.New("strategy.notional_usd exceeds risk.max_notional_usd")

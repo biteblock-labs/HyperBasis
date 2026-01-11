@@ -180,6 +180,7 @@ func (a *App) Run(ctx context.Context) error {
 	if a.log != nil {
 		a.log.Info("startup: account ws started")
 	}
+	a.startSpotReconciler(ctx)
 	if err := a.market.Start(ctx); err != nil {
 		return err
 	}
@@ -215,7 +216,6 @@ func (a *App) tick(ctx context.Context) error {
 	if err := a.market.RefreshContexts(ctx); err != nil {
 		a.log.Warn("context refresh failed", zap.Error(err))
 	}
-	a.refreshSpotBalancesWS(ctx)
 	perpAsset := a.cfg.Strategy.PerpAsset
 	spotAsset := a.cfg.Strategy.SpotAsset
 	spotMid, spotCtx, err := a.spotMid(ctx, spotAsset)
@@ -340,7 +340,9 @@ func (a *App) refreshSpotBalancesWS(ctx context.Context) {
 	defer cancel()
 	if err := a.account.RefreshSpotBalancesWS(refreshCtx); err != nil {
 		a.logSpotRefreshError(err)
+		return
 	}
+	a.spotRefreshWarned = false
 }
 
 func (a *App) logSpotRefreshError(err error) {
@@ -352,6 +354,29 @@ func (a *App) logSpotRefreshError(err error) {
 	}
 	a.spotRefreshWarned = true
 	a.log.Warn("spot balance refresh failed", zap.Error(err))
+}
+
+func (a *App) startSpotReconciler(ctx context.Context) {
+	if a.cfg == nil {
+		return
+	}
+	interval := a.cfg.Strategy.SpotReconcileInterval
+	if interval <= 0 {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		a.refreshSpotBalancesWS(ctx)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				a.refreshSpotBalancesWS(ctx)
+			}
+		}
+	}()
 }
 
 func (a *App) enterPosition(ctx context.Context, snap strategy.MarketSnapshot) error {

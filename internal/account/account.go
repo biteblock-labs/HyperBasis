@@ -43,6 +43,7 @@ type Account struct {
 const (
 	maxSeenFillKeys = 2000
 	maxFillOrderIDs = 2000
+	balanceEpsilon  = 1e-9
 )
 
 type State struct {
@@ -129,6 +130,16 @@ func (a *Account) Start(ctx context.Context) error {
 	if err := a.ws.Subscribe(ctx, fillsSub); err != nil {
 		return err
 	}
+	ledgerSub := map[string]any{
+		"method": "subscribe",
+		"subscription": map[string]any{
+			"type": "userNonFundingLedgerUpdates",
+			"user": a.user,
+		},
+	}
+	if err := a.ws.Subscribe(ctx, ledgerSub); err != nil {
+		return err
+	}
 	a.mu.Lock()
 	a.fillsEnabled = true
 	a.mu.Unlock()
@@ -175,6 +186,8 @@ func (a *Account) handleMessage(msg json.RawMessage) {
 		a.applyClearinghouseUpdate(payload["data"])
 	case "userFills":
 		a.applyUserFillsUpdate(payload["data"])
+	case "userNonFundingLedgerUpdates":
+		a.applyLedgerUpdates(payload["data"])
 	}
 }
 
@@ -382,6 +395,181 @@ func parseSpotBalances(data any) map[string]float64 {
 		return parseBalanceEntries(payload)
 	}
 	return nil
+}
+
+func parseLedgerUpdates(data any) []map[string]any {
+	if data == nil {
+		return nil
+	}
+	switch payload := data.(type) {
+	case []map[string]any:
+		return payload
+	case []any:
+		return normalizeLedgerUpdates(payload)
+	case map[string]any:
+		if list, ok := payload["updates"].([]any); ok {
+			return normalizeLedgerUpdates(list)
+		}
+		if list, ok := payload["ledgerUpdates"].([]any); ok {
+			return normalizeLedgerUpdates(list)
+		}
+		if list, ok := payload["data"].([]any); ok {
+			return normalizeLedgerUpdates(list)
+		}
+		if nested, ok := payload["data"].(map[string]any); ok {
+			if updates := parseLedgerUpdates(nested); len(updates) > 0 {
+				return updates
+			}
+		}
+		if _, ok := payload["type"]; ok {
+			return []map[string]any{payload}
+		}
+	}
+	return nil
+}
+
+func normalizeLedgerUpdates(raw []any) []map[string]any {
+	if len(raw) == 0 {
+		return nil
+	}
+	updates := make([]map[string]any, 0, len(raw))
+	for _, item := range raw {
+		if entry, ok := item.(map[string]any); ok {
+			updates = append(updates, entry)
+		}
+	}
+	return updates
+}
+
+func ledgerSnapshot(data any) bool {
+	if isSnapshot, has := snapshotFlag(data); has {
+		return isSnapshot
+	}
+	if payload, ok := data.(map[string]any); ok {
+		if nested, ok := payload["data"]; ok {
+			if isSnapshot, has := snapshotFlag(nested); has {
+				return isSnapshot
+			}
+		}
+	}
+	return false
+}
+
+func signedLedgerAmount(amount float64, update map[string]any, user string) float64 {
+	if amount == 0 {
+		return 0
+	}
+	if amount < 0 {
+		return amount
+	}
+	me := normalizeAddr(user)
+	if me == "" {
+		return amount
+	}
+	dest := normalizeAddr(stringFromAny(update["destination"]))
+	if dest != "" && dest == me {
+		return amount
+	}
+	from := normalizeAddr(stringFromAny(update["user"]))
+	if from != "" && from == me {
+		return -amount
+	}
+	return amount
+}
+
+func ledgerDelta(update map[string]any, user string) (string, float64, bool) {
+	switch strings.ToLower(stringFromAny(update["type"])) {
+	case "spottransfer":
+		asset := stringFromAny(update["token"])
+		if asset == "" {
+			asset = stringFromAny(update["coin"])
+		}
+		amount, ok := floatFromAny(update["amount"])
+		if !ok {
+			return "", 0, false
+		}
+		delta := signedLedgerAmount(amount, update, user)
+		if asset == "" || delta == 0 {
+			return "", 0, false
+		}
+		return asset, delta, true
+	case "spotgenesis":
+		asset := stringFromAny(update["token"])
+		amount, ok := floatFromAny(update["amount"])
+		if !ok {
+			return "", 0, false
+		}
+		if asset == "" || amount == 0 {
+			return "", 0, false
+		}
+		return asset, amount, true
+	case "accountclasstransfer":
+		usdc, ok := floatFromAny(update["usdc"])
+		if !ok {
+			return "", 0, false
+		}
+		toPerp, ok := boolFromAny(update["toPerp"])
+		if !ok {
+			return "", 0, false
+		}
+		if usdc == 0 {
+			return "", 0, false
+		}
+		if toPerp {
+			return "USDC", -usdc, true
+		}
+		return "USDC", usdc, true
+	}
+	asset := stringFromAny(update["token"])
+	if asset == "" {
+		return "", 0, false
+	}
+	amount, ok := floatFromAny(update["amount"])
+	if !ok || amount == 0 {
+		return "", 0, false
+	}
+	return asset, amount, true
+}
+
+func (a *Account) applyLedgerUpdates(data any) {
+	updates := parseLedgerUpdates(data)
+	if len(updates) == 0 {
+		return
+	}
+	if ledgerSnapshot(data) {
+		a.mu.Lock()
+		if a.state.LastRawUpdate == nil {
+			a.state.LastRawUpdate = make(map[string]any)
+		}
+		a.state.LastRawUpdate["ws_user_non_funding_ledger"] = data
+		a.mu.Unlock()
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.hasSpotStateSnapshot {
+		return
+	}
+	if a.state.SpotBalances == nil {
+		a.state.SpotBalances = make(map[string]float64)
+	}
+	for _, update := range updates {
+		asset, delta, ok := ledgerDelta(update, a.user)
+		if !ok {
+			continue
+		}
+		next := a.state.SpotBalances[asset] + delta
+		if math.Abs(next) <= balanceEpsilon {
+			delete(a.state.SpotBalances, asset)
+			continue
+		}
+		a.state.SpotBalances[asset] = next
+	}
+	if a.state.LastRawUpdate == nil {
+		a.state.LastRawUpdate = make(map[string]any)
+	}
+	a.state.LastRawUpdate["ws_user_non_funding_ledger"] = data
+	a.hasSpotStateSnapshot = true
 }
 
 func (a *Account) RefreshSpotBalancesWS(ctx context.Context) error {
@@ -689,6 +877,10 @@ func snapshotFlag(data any) (bool, bool) {
 
 func floatKey(v float64) string {
 	return strconv.FormatFloat(v, 'g', 12, 64)
+}
+
+func normalizeAddr(addr string) string {
+	return strings.ToLower(strings.TrimSpace(addr))
 }
 
 func orderIDFromOrder(order map[string]any) string {

@@ -18,6 +18,7 @@
   - `/info` parsing for spot balances, perp positions, open orders.
   - WS subscriptions for `openOrders` + `clearinghouseState` with snapshot/delta handling.
   - Spot balances are retrieved via WS post `/info` (`spotClearinghouseState`); there is no spot wallet subscription type.
+  - WS `userNonFundingLedgerUpdates` applies spot balance deltas (spot transfers/account-class transfers) with periodic `spotClearinghouseState` reconcile (`strategy.spot_reconcile_interval`).
   - WS `userFills` feed for fill tracking with hash dedupe and LRU-capped cache; entry sizing uses WS fills with REST fallback on close/timeout.
 - Execution:
   - `internal/hl/exchange`: msgpack + EIP-712 signing compatible with the official SDK.

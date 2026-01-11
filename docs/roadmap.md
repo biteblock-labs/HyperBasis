@@ -32,6 +32,7 @@ WebSocket (wss://api.hyperliquid.xyz/ws):
 - `openOrders` (your open orders)
 - `clearinghouseState` (perp positions/margin)
 - `userFills` (fills for your orders)
+- `userNonFundingLedgerUpdates` (spot wallet deltas)
 - `candle` (volatility filter)
 - `method: "post"` `/info`: `spotClearinghouseState` (spot balances)
 
@@ -123,7 +124,7 @@ If exposure exists and funding is bad: exit.
 - [x] Phase 2 (WS): Parse perp/open-order updates from WebSocket feeds.
 - [x] Phase 2 (WS): Parse user fills feed for order fill tracking.
 - [x] Phase 2 (WS): Spot balances via WS post snapshots (`spotClearinghouseState`).
-- [ ] Phase 2 (WS): Spot balance deltas via `userNonFundingLedgerUpdates`.
+- [x] Phase 2 (WS): Spot balance deltas via `userNonFundingLedgerUpdates`.
 - [x] Phase 2: Persist exchange nonces in SQLite for restart safety.
 - [x] Phase 2: Persist last action and exposure in SQLite for restart safety.
 - [x] Phase 2: Add signed /exchange order action (EIP-712) and CLI verification order.

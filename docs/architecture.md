@@ -28,11 +28,13 @@
   - REST reconcile (spot balances, perp positions, open orders).
   - Load the persisted strategy snapshot and restore the state machine based on last action + current exposure.
   - Start WS subscriptions for market data and account state.
+  - Start periodic spot balance reconcile via WS post `spotClearinghouseState`.
 - Runtime:
   - Strategy tick reads mid price, funding, volatility.
   - Risk checks gate entry/exit and position changes.
   - State machine drives entry, steady state, and exit flows.
   - Executor places/cancels orders with idempotent client order IDs.
+  - Account WS applies `userNonFundingLedgerUpdates` spot balance deltas between reconciles.
 
 ## Sequence Diagram (Runtime Tick)
 ```mermaid
@@ -84,6 +86,7 @@ sequenceDiagram
 - `internal/config/config.yaml` includes endpoints, timeouts, strategy thresholds, and risk limits.
 - Config defaults are applied in `internal/config/config.go`.
 - `strategy.min_exposure_usd` treats small residual exposure as dust to avoid tiny exit orders.
+- `strategy.spot_reconcile_interval` controls periodic spot balance refreshes via WS post.
 - `ws.ping_interval` keeps WebSocket connections alive to avoid idle disconnects.
 
 ## Dependencies

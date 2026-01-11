@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestStrategyAssetDefaults(t *testing.T) {
 	cfg := &Config{Strategy: StrategyConfig{Asset: "BTC", NotionalUSD: 1}}
@@ -33,6 +36,9 @@ func TestStrategyEntryDefaults(t *testing.T) {
 	if cfg.Strategy.MinExposureUSD <= 0 {
 		t.Fatalf("expected min exposure default, got %v", cfg.Strategy.MinExposureUSD)
 	}
+	if cfg.Strategy.SpotReconcileInterval <= 0 {
+		t.Fatalf("expected spot reconcile interval default, got %v", cfg.Strategy.SpotReconcileInterval)
+	}
 }
 
 func TestValidateRequiresPerpAsset(t *testing.T) {
@@ -40,5 +46,18 @@ func TestValidateRequiresPerpAsset(t *testing.T) {
 	applyDefaults(cfg)
 	if err := validate(cfg); err == nil {
 		t.Fatalf("expected error for missing perp asset")
+	}
+}
+
+func TestValidateRejectsNegativeSpotReconcileInterval(t *testing.T) {
+	cfg := &Config{Strategy: StrategyConfig{
+		PerpAsset:             "BTC",
+		SpotAsset:             "UBTC",
+		NotionalUSD:           1,
+		SpotReconcileInterval: -1 * time.Second,
+	}}
+	applyDefaults(cfg)
+	if err := validate(cfg); err == nil {
+		t.Fatalf("expected error for negative spot reconcile interval")
 	}
 }

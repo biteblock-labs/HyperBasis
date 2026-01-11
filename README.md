@@ -18,7 +18,7 @@ Hyperliquid delta-neutral funding-rate carry bot scaffold (long spot + short per
 - `docs/ops_runbook.md`: operations runbook (deployment + troubleshooting)
 
 ## Architecture Summary
-The bot wires configuration + logging, reconciles account state at startup, consumes REST/WS market data, and runs a state machine that gates entry/exit while enforcing risk checks. Orders flow through an idempotent executor backed by a persistent store; the store also persists exchange nonces and a strategy snapshot (last action + exposure + last mids) to make restarts safer.
+The bot wires configuration + logging, reconciles account state at startup, consumes REST/WS market data, and runs a state machine that gates entry/exit while enforcing risk checks. Orders flow through an idempotent executor backed by a persistent store; the store also persists exchange nonces and a strategy snapshot (last action + exposure + last mids) to make restarts safer. Spot balances are maintained with WS ledger deltas plus periodic WS post snapshots.
 
 ## Quick start
 1. Copy `internal/config/config.yaml` and adjust settings (notably `strategy.perp_asset` and `strategy.spot_asset`).
@@ -43,6 +43,7 @@ The bot wires configuration + logging, reconciles account state at startup, cons
 - Exchange nonces are persisted in SQLite to avoid reuse after restarts (startup logs nonce key/seed).
 - The bot persists a strategy snapshot (last action + exposure + last mids) to SQLite and restores strategy state on startup when available.
 - `strategy.min_exposure_usd` treats small residual exposure as dust to avoid tiny exit orders / 422s.
+- Spot balances are refreshed via WS post `spotClearinghouseState` and delta-updated via `userNonFundingLedgerUpdates`; reconcile cadence is `strategy.spot_reconcile_interval`.
 - Placeholder types are used where schemas are unknown.
 
 ## Testing

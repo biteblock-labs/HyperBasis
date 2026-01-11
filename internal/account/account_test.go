@@ -262,6 +262,72 @@ func TestParseSpotBalancesPost(t *testing.T) {
 	}
 }
 
+func TestLedgerUpdatesSpotTransfer(t *testing.T) {
+	acct := &Account{log: zap.NewNop(), user: "0xabc"}
+	acct.state.SpotBalances = map[string]float64{"UBTC": 0.05}
+	acct.hasSpotStateSnapshot = true
+
+	update := map[string]any{
+		"channel": "userNonFundingLedgerUpdates",
+		"data": map[string]any{
+			"updates": []any{
+				map[string]any{"type": "spotTransfer", "token": "UBTC", "amount": 0.02, "user": "0xabc", "destination": "0xdef"},
+				map[string]any{"type": "spotTransfer", "token": "UBTC", "amount": 0.01, "user": "0xdef", "destination": "0xabc"},
+			},
+		},
+	}
+	raw, _ := json.Marshal(update)
+	acct.handleMessage(raw)
+	state := acct.Snapshot()
+	if got := state.SpotBalances["UBTC"]; math.Abs(got-0.04) > 1e-9 {
+		t.Fatalf("expected UBTC 0.04, got %f", got)
+	}
+}
+
+func TestLedgerUpdatesAccountClassTransfer(t *testing.T) {
+	acct := &Account{log: zap.NewNop(), user: "0xabc"}
+	acct.state.SpotBalances = map[string]float64{"USDC": 100}
+	acct.hasSpotStateSnapshot = true
+
+	update := map[string]any{
+		"channel": "userNonFundingLedgerUpdates",
+		"data": map[string]any{
+			"updates": []any{
+				map[string]any{"type": "accountClassTransfer", "usdc": 25.0, "toPerp": true},
+				map[string]any{"type": "accountClassTransfer", "usdc": 5.0, "toPerp": false},
+			},
+		},
+	}
+	raw, _ := json.Marshal(update)
+	acct.handleMessage(raw)
+	state := acct.Snapshot()
+	if got := state.SpotBalances["USDC"]; math.Abs(got-80) > 1e-9 {
+		t.Fatalf("expected USDC 80, got %f", got)
+	}
+}
+
+func TestLedgerUpdatesIgnoreSnapshot(t *testing.T) {
+	acct := &Account{log: zap.NewNop(), user: "0xabc"}
+	acct.state.SpotBalances = map[string]float64{"UBTC": 1}
+	acct.hasSpotStateSnapshot = true
+
+	update := map[string]any{
+		"channel": "userNonFundingLedgerUpdates",
+		"data": map[string]any{
+			"isSnapshot": true,
+			"updates": []any{
+				map[string]any{"type": "spotTransfer", "token": "UBTC", "amount": 0.5, "user": "0xabc", "destination": "0xdef"},
+			},
+		},
+	}
+	raw, _ := json.Marshal(update)
+	acct.handleMessage(raw)
+	state := acct.Snapshot()
+	if got := state.SpotBalances["UBTC"]; math.Abs(got-1) > 1e-9 {
+		t.Fatalf("expected UBTC 1, got %f", got)
+	}
+}
+
 func TestUserFillsEvictsOldOrderIDs(t *testing.T) {
 	acct := &Account{log: zap.NewNop()}
 	fills := make([]any, 0, maxFillOrderIDs+1)
