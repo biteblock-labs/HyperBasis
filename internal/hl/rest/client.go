@@ -31,6 +31,7 @@ func New(baseURL string, timeout time.Duration, log *zap.Logger) *Client {
 
 type InfoRequest struct {
 	Type string `json:"type"`
+	User string `json:"user,omitempty"`
 }
 
 type ExchangeRequest struct {

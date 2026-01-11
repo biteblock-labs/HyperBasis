@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"hl-carry-bot/internal/hl/rest"
 	"hl-carry-bot/internal/logging"
 	"hl-carry-bot/internal/market"
+	"hl-carry-bot/internal/state/sqlite"
 )
 
 const (
@@ -60,7 +62,11 @@ func main() {
 
 	asset := strings.TrimSpace(os.Getenv("HL_VERIFY_ASSET"))
 	if asset == "" && cfg != nil {
-		asset = cfg.Strategy.Asset
+		if cfg.Strategy.SpotAsset != "" {
+			asset = cfg.Strategy.SpotAsset
+		} else {
+			asset = cfg.Strategy.Asset
+		}
 	}
 	if asset == "" {
 		fatal(errors.New("HL_VERIFY_ASSET is required"))
@@ -138,7 +144,10 @@ func main() {
 	if limitPrice <= 0 {
 		fatal(errors.New("limit price must be > 0"))
 	}
-	limitPrice = roundTo(limitPrice, 8)
+	limitPrice = normalizeLimitPrice(limitPrice, true, spotCtx.BaseSzDecimals)
+	if limitPrice <= 0 {
+		fatal(errors.New("limit price <= 0 after tick rounding"))
+	}
 
 	size := notional / limitPrice
 	if spotCtx.BaseSzDecimals >= 0 {
@@ -162,11 +171,27 @@ func main() {
 	if err != nil {
 		fatal(err)
 	}
+	statePath := "data/hl-carry-bot.db"
+	if cfg != nil && cfg.State.SQLitePath != "" {
+		statePath = cfg.State.SQLitePath
+	}
+	if statePath != "" {
+		if err := os.MkdirAll(filepath.Dir(statePath), 0o755); err != nil {
+			log.Warn("nonce store init failed: " + err.Error())
+		} else if store, err := sqlite.New(statePath); err != nil {
+			log.Warn("nonce store init failed: " + err.Error())
+		} else {
+			defer store.Close()
+			if err := exClient.InitNonceStore(ctx, store); err != nil {
+				log.Warn("nonce store init failed: " + err.Error())
+			}
+		}
+	}
 	resp, err := exClient.PlaceOrder(ctx, order)
 	if err != nil {
 		fatal(err)
 	}
-	orderID := parseOrderID(resp)
+	orderID := exchange.OrderIDFromResponse(resp)
 	if orderID != "" {
 		fmt.Printf("exchange response: order_id=%s\n", orderID)
 		return
@@ -233,40 +258,26 @@ func roundTo(value float64, decimals int) float64 {
 	return math.Round(value*factor) / factor
 }
 
-func parseOrderID(resp map[string]any) string {
-	if resp == nil {
-		return ""
+func normalizeLimitPrice(price float64, isSpot bool, szDecimals int) float64 {
+	if price == 0 {
+		return 0
 	}
-	for _, key := range []string{"orderId", "orderID", "oid", "id"} {
-		if v, ok := resp[key]; ok {
-			if id := stringFromAny(v); id != "" {
-				return id
-			}
+	// Hyperliquid enforces a tick size that is effectively a combination of
+	// (a) 5 significant figures and (b) a decimal precision derived from szDecimals.
+	if sig, err := strconv.ParseFloat(strconv.FormatFloat(price, 'g', 5, 64), 64); err == nil {
+		price = sig
+	}
+	decimals := 6
+	if isSpot {
+		decimals = 8
+	}
+	if szDecimals >= 0 {
+		decimals -= szDecimals
+		if decimals < 0 {
+			decimals = 0
 		}
 	}
-	for _, key := range []string{"response", "data"} {
-		if nested, ok := resp[key].(map[string]any); ok {
-			if id := parseOrderID(nested); id != "" {
-				return id
-			}
-		}
-	}
-	return ""
-}
-
-func stringFromAny(v any) string {
-	switch val := v.(type) {
-	case string:
-		return val
-	case float64:
-		return strconv.FormatInt(int64(val), 10)
-	case int:
-		return strconv.Itoa(val)
-	case int64:
-		return strconv.FormatInt(val, 10)
-	default:
-		return ""
-	}
+	return roundTo(price, decimals)
 }
 
 func fatal(err error) {

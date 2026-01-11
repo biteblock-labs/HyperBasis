@@ -1,5 +1,5 @@
 log:
-  level: info
+  level: debug
 
 rest:
   base_url: https://api.hyperliquid.xyz
@@ -8,16 +8,20 @@ rest:
 ws:
   url: wss://api.hyperliquid.xyz/ws
   reconnect_delay: 3s
+  ping_interval: 50s
 
 state:
   sqlite_path: data/hl-carry-bot.db
 
 strategy:
-  asset: BTC
+  perp_asset: BTC
+  spot_asset: UBTC
   notional_usd: 1000
   min_funding_rate: 0.0002
   max_volatility: 0.02
   entry_interval: 30s
+  entry_timeout: 5s
+  entry_poll_interval: 250ms
   exit_on_funding_dip: true
   candle_interval: 1h
   candle_window: 24

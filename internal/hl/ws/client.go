@@ -14,6 +14,7 @@ import (
 type Client struct {
 	url            string
 	reconnectDelay time.Duration
+	pingInterval   time.Duration
 	log            *zap.Logger
 
 	mu   sync.Mutex
@@ -21,8 +22,8 @@ type Client struct {
 	subs []interface{}
 }
 
-func New(url string, reconnectDelay time.Duration, log *zap.Logger) *Client {
-	return &Client{url: url, reconnectDelay: reconnectDelay, log: log}
+func New(url string, reconnectDelay, pingInterval time.Duration, log *zap.Logger) *Client {
+	return &Client{url: url, reconnectDelay: reconnectDelay, pingInterval: pingInterval, log: log}
 }
 
 func (c *Client) Connect(ctx context.Context) error {
@@ -55,8 +56,20 @@ func (c *Client) Run(ctx context.Context, handler func(json.RawMessage)) error {
 		if err := c.ensureConnected(ctx); err != nil {
 			return err
 		}
-		if err := c.readLoop(ctx, handler); err != nil {
-			c.log.Warn("ws read loop ended", zap.Error(err))
+		pingCtx, cancel := context.WithCancel(ctx)
+		pingDone := make(chan struct{})
+		go func() {
+			defer close(pingDone)
+			c.pingLoop(pingCtx)
+		}()
+		err := c.readLoop(ctx, handler)
+		cancel()
+		<-pingDone
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			c.logReadLoopError(err)
 			c.resetConn()
 			select {
 			case <-ctx.Done():
@@ -102,6 +115,45 @@ func (c *Client) readLoop(ctx context.Context, handler func(json.RawMessage)) er
 	}
 }
 
+func (c *Client) pingLoop(ctx context.Context) {
+	c.mu.Lock()
+	conn := c.conn
+	interval := c.pingInterval
+	c.mu.Unlock()
+	if conn == nil || interval <= 0 {
+		return
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := writeJSON(ctx, conn, pingMessage); err != nil {
+				return
+			}
+		}
+	}
+}
+
+func (c *Client) logReadLoopError(err error) {
+	if c.log == nil {
+		return
+	}
+	status := websocket.CloseStatus(err)
+	if status == websocket.StatusNormalClosure {
+		var closeErr websocket.CloseError
+		if errors.As(err, &closeErr) {
+			c.log.Info("ws read loop ended", zap.Int("status", int(closeErr.Code)), zap.String("reason", closeErr.Reason))
+			return
+		}
+		c.log.Info("ws read loop ended", zap.Error(err))
+		return
+	}
+	c.log.Warn("ws read loop ended", zap.Error(err))
+}
+
 func (c *Client) resetConn() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -118,3 +170,5 @@ func writeJSON(ctx context.Context, conn *websocket.Conn, v interface{}) error {
 	}
 	return conn.Write(ctx, websocket.MessageText, data)
 }
+
+var pingMessage = map[string]any{"method": "ping"}

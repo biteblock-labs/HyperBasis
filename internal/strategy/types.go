@@ -19,8 +19,10 @@ const (
 )
 
 type MarketSnapshot struct {
-	Asset          string
-	MidPrice       float64
+	PerpAsset      string
+	SpotAsset      string
+	SpotMidPrice   float64
+	PerpMidPrice   float64
 	OraclePrice    float64
 	FundingRate    float64
 	Volatility     float64

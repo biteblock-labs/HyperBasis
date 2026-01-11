@@ -30,6 +30,7 @@ type RESTConfig struct {
 type WSConfig struct {
 	URL            string        `yaml:"url"`
 	ReconnectDelay time.Duration `yaml:"reconnect_delay"`
+	PingInterval   time.Duration `yaml:"ping_interval"`
 }
 
 type StateConfig struct {
@@ -37,14 +38,18 @@ type StateConfig struct {
 }
 
 type StrategyConfig struct {
-	Asset            string        `yaml:"asset"`
-	NotionalUSD      float64       `yaml:"notional_usd"`
-	MinFundingRate   float64       `yaml:"min_funding_rate"`
-	MaxVolatility    float64       `yaml:"max_volatility"`
-	EntryInterval    time.Duration `yaml:"entry_interval"`
-	ExitOnFundingDip bool          `yaml:"exit_on_funding_dip"`
-	CandleInterval   string        `yaml:"candle_interval"`
-	CandleWindow     int           `yaml:"candle_window"`
+	Asset             string        `yaml:"asset"`
+	PerpAsset         string        `yaml:"perp_asset"`
+	SpotAsset         string        `yaml:"spot_asset"`
+	NotionalUSD       float64       `yaml:"notional_usd"`
+	MinFundingRate    float64       `yaml:"min_funding_rate"`
+	MaxVolatility     float64       `yaml:"max_volatility"`
+	EntryInterval     time.Duration `yaml:"entry_interval"`
+	EntryTimeout      time.Duration `yaml:"entry_timeout"`
+	EntryPollInterval time.Duration `yaml:"entry_poll_interval"`
+	ExitOnFundingDip  bool          `yaml:"exit_on_funding_dip"`
+	CandleInterval    string        `yaml:"candle_interval"`
+	CandleWindow      int           `yaml:"candle_window"`
 }
 
 type RiskConfig struct {
@@ -90,11 +95,20 @@ func applyDefaults(cfg *Config) {
 	if cfg.WS.ReconnectDelay == 0 {
 		cfg.WS.ReconnectDelay = 3 * time.Second
 	}
+	if cfg.WS.PingInterval == 0 {
+		cfg.WS.PingInterval = 50 * time.Second
+	}
 	if cfg.State.SQLitePath == "" {
 		cfg.State.SQLitePath = "data/hl-carry-bot.db"
 	}
 	if cfg.Strategy.EntryInterval == 0 {
 		cfg.Strategy.EntryInterval = 30 * time.Second
+	}
+	if cfg.Strategy.EntryTimeout == 0 {
+		cfg.Strategy.EntryTimeout = 5 * time.Second
+	}
+	if cfg.Strategy.EntryPollInterval == 0 {
+		cfg.Strategy.EntryPollInterval = 250 * time.Millisecond
 	}
 	if cfg.Strategy.CandleInterval == "" {
 		cfg.Strategy.CandleInterval = "1h"
@@ -102,14 +116,33 @@ func applyDefaults(cfg *Config) {
 	if cfg.Strategy.CandleWindow == 0 {
 		cfg.Strategy.CandleWindow = 24
 	}
+	if cfg.Strategy.PerpAsset == "" && cfg.Strategy.Asset != "" {
+		cfg.Strategy.PerpAsset = cfg.Strategy.Asset
+	}
+	if cfg.Strategy.SpotAsset == "" {
+		if cfg.Strategy.Asset != "" {
+			cfg.Strategy.SpotAsset = cfg.Strategy.Asset
+		} else if cfg.Strategy.PerpAsset != "" {
+			cfg.Strategy.SpotAsset = cfg.Strategy.PerpAsset
+		}
+	}
 }
 
 func validate(cfg *Config) error {
-	if cfg.Strategy.Asset == "" {
-		return errors.New("strategy.asset is required")
+	if cfg.Strategy.PerpAsset == "" {
+		return errors.New("strategy.perp_asset is required")
+	}
+	if cfg.Strategy.SpotAsset == "" {
+		return errors.New("strategy.spot_asset is required")
 	}
 	if cfg.Strategy.NotionalUSD <= 0 {
 		return errors.New("strategy.notional_usd must be > 0")
+	}
+	if cfg.Strategy.EntryTimeout <= 0 {
+		return errors.New("strategy.entry_timeout must be > 0")
+	}
+	if cfg.Strategy.EntryPollInterval <= 0 {
+		return errors.New("strategy.entry_poll_interval must be > 0")
 	}
 	if cfg.Risk.MaxNotionalUSD > 0 && cfg.Strategy.NotionalUSD > cfg.Risk.MaxNotionalUSD {
 		return errors.New("strategy.notional_usd exceeds risk.max_notional_usd")

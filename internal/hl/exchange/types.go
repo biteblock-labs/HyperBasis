@@ -33,6 +33,25 @@ type OrderAction struct {
 	Builder  any         `json:"builder,omitempty"`
 }
 
+type CancelWire struct {
+	Asset   int   `json:"a"`
+	OrderID int64 `json:"o"`
+}
+
+type CancelAction struct {
+	Type    string       `json:"type"`
+	Cancels []CancelWire `json:"cancels"`
+}
+
+type USDClassTransferAction struct {
+	Type             string `json:"type"`
+	Amount           string `json:"amount"`
+	ToPerp           bool   `json:"toPerp"`
+	Nonce            uint64 `json:"nonce"`
+	SignatureChainID string `json:"signatureChainId,omitempty"`
+	HyperliquidChain string `json:"hyperliquidChain,omitempty"`
+}
+
 type Signature struct {
 	R string `json:"r"`
 	S string `json:"s"`

@@ -6,8 +6,8 @@ func TestParsePerpContextsArray(t *testing.T) {
 	payload := []any{
 		map[string]any{
 			"universe": []any{
-				map[string]any{"name": "BTC"},
-				map[string]any{"name": "ETH"},
+				map[string]any{"name": "BTC", "szDecimals": 5},
+				map[string]any{"name": "ETH", "szDecimals": 4},
 			},
 		},
 		[]any{
@@ -29,6 +29,9 @@ func TestParsePerpContextsArray(t *testing.T) {
 	}
 	if btc.Index != 0 {
 		t.Fatalf("expected BTC index 0, got %d", btc.Index)
+	}
+	if btc.SzDecimals != 5 {
+		t.Fatalf("expected BTC sz decimals 5, got %d", btc.SzDecimals)
 	}
 	eth := ctxs["ETH"]
 	if !closeEnough(eth.FundingRate, 0.002) {

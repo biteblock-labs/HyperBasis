@@ -49,5 +49,8 @@ func priceForFunding(snap MarketSnapshot) float64 {
 	if snap.OraclePrice > 0 {
 		return snap.OraclePrice
 	}
-	return snap.MidPrice
+	if snap.PerpMidPrice > 0 {
+		return snap.PerpMidPrice
+	}
+	return snap.SpotMidPrice
 }

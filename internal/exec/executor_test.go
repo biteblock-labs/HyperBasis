@@ -58,9 +58,9 @@ func (m *mockRest) PlaceOrder(ctx context.Context, order Order) (string, error) 
 	return m.orderID, nil
 }
 
-func (m *mockRest) CancelOrder(ctx context.Context, orderID string) error {
+func (m *mockRest) CancelOrder(ctx context.Context, cancel Cancel) error {
 	_ = ctx
-	_ = orderID
+	_ = cancel
 	return nil
 }
 

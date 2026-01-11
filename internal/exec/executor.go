@@ -19,11 +19,17 @@ type Order struct {
 	LimitPrice    float64
 	ReduceOnly    bool
 	ClientOrderID string
+	Tif           string
+}
+
+type Cancel struct {
+	Asset   int
+	OrderID string
 }
 
 type RestClient interface {
 	PlaceOrder(ctx context.Context, order Order) (string, error)
-	CancelOrder(ctx context.Context, orderID string) error
+	CancelOrder(ctx context.Context, cancel Cancel) error
 }
 
 type Executor struct {
@@ -80,9 +86,9 @@ func (e *Executor) PlaceOrder(ctx context.Context, order Order) (string, error) 
 	return orderID, nil
 }
 
-func (e *Executor) CancelOrder(ctx context.Context, orderID string) error {
+func (e *Executor) CancelOrder(ctx context.Context, cancel Cancel) error {
 	return e.retry(ctx, func() error {
-		return e.rest.CancelOrder(ctx, orderID)
+		return e.rest.CancelOrder(ctx, cancel)
 	})
 }
 

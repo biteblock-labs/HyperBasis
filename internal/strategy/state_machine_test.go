@@ -16,6 +16,12 @@ func TestStateMachineTransitions(t *testing.T) {
 	if sm.Apply(EventExit) != StateExit {
 		t.Fatalf("expected %s, got %s", StateExit, sm.State)
 	}
+	if sm.Apply(EventHedgeOK) != StateHedgeOK {
+		t.Fatalf("expected %s, got %s", StateHedgeOK, sm.State)
+	}
+	if sm.Apply(EventExit) != StateExit {
+		t.Fatalf("expected %s, got %s", StateExit, sm.State)
+	}
 	if sm.Apply(EventDone) != StateIdle {
 		t.Fatalf("expected %s, got %s", StateIdle, sm.State)
 	}

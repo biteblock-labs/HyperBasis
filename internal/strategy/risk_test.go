@@ -18,8 +18,8 @@ func TestFundingNotionalUSDUsesOracle(t *testing.T) {
 
 func TestFundingNotionalUSDFallbacks(t *testing.T) {
 	snap := MarketSnapshot{
-		MidPrice:    50,
-		SpotBalance: 3,
+		PerpMidPrice: 50,
+		SpotBalance:  3,
 	}
 	if got := fundingNotionalUSD(snap); got != 150 {
 		t.Fatalf("expected 150, got %f", got)

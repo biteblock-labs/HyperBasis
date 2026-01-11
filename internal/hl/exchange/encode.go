@@ -60,6 +60,38 @@ func EncodeOrderAction(action OrderAction) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+func EncodeCancelAction(action CancelAction) ([]byte, error) {
+	if action.Type == "" {
+		return nil, errors.New("action type is required")
+	}
+	if len(action.Cancels) == 0 {
+		return nil, errors.New("action cancels are required")
+	}
+	var buf bytes.Buffer
+	enc := msgpack.NewEncoder(&buf)
+	if err := enc.EncodeMapLen(2); err != nil {
+		return nil, err
+	}
+	if err := enc.EncodeString("type"); err != nil {
+		return nil, err
+	}
+	if err := enc.EncodeString(action.Type); err != nil {
+		return nil, err
+	}
+	if err := enc.EncodeString("cancels"); err != nil {
+		return nil, err
+	}
+	if err := enc.EncodeArrayLen(len(action.Cancels)); err != nil {
+		return nil, err
+	}
+	for _, cancel := range action.Cancels {
+		if err := encodeCancelWire(enc, cancel); err != nil {
+			return nil, err
+		}
+	}
+	return buf.Bytes(), nil
+}
+
 func encodeOrderWire(enc *msgpack.Encoder, order OrderWire) error {
 	mapLen := 6
 	if order.Cloid != "" {
@@ -113,6 +145,22 @@ func encodeOrderWire(enc *msgpack.Encoder, order OrderWire) error {
 		}
 	}
 	return nil
+}
+
+func encodeCancelWire(enc *msgpack.Encoder, cancel CancelWire) error {
+	if err := enc.EncodeMapLen(2); err != nil {
+		return err
+	}
+	if err := enc.EncodeString("a"); err != nil {
+		return err
+	}
+	if err := enc.EncodeInt(int64(cancel.Asset)); err != nil {
+		return err
+	}
+	if err := enc.EncodeString("o"); err != nil {
+		return err
+	}
+	return enc.EncodeInt(cancel.OrderID)
 }
 
 func encodeOrderTypeWire(enc *msgpack.Encoder, orderType OrderTypeWire) error {

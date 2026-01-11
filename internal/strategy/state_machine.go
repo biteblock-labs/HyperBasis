@@ -36,6 +36,9 @@ func nextState(current State, event Event) State {
 			return StateExit
 		}
 	case StateExit:
+		if event == EventHedgeOK {
+			return StateHedgeOK
+		}
 		if event == EventDone {
 			return StateIdle
 		}

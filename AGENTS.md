@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Session Start
-Before making changes, read `docs/roadmap.md` to align with the current architecture, risk model, and development roadmap.
+Before making changes, read `docs/roadmap.md` and `docs/handoff.md` to align with the current architecture, risk model, and development roadmap.
 
 ## Project Structure & Module Organization
 Source lives in `cmd/bot/main.go` (entrypoint) and `internal/` for app wiring + domain modules (`hl/`, `market/`, `account/`, `exec/`, `strategy/`, `state/`, `logging/`, `metrics/`, `alerts/`). Tests live alongside code as `*_test.go` (e.g., `internal/strategy/state_machine_test.go`). Ops assets are in `scripts/systemd/`. Sample config is in `internal/config/config.yaml`; runtime data is in `data/` (gitignored).

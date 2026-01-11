@@ -7,10 +7,12 @@
 
 ## Package Map
 - `cmd/bot`: entrypoint and process lifecycle.
+- `cmd/verify`: tiny signed spot order verifier used to confirm asset IDs and signing.
 - `internal/app`: dependency wiring, reconcile-on-start, and main loop.
 - `internal/config`: config schema, defaults, validation, YAML loader.
 - `internal/logging`: zap logger setup.
-- `internal/hl/rest`: REST client for `POST /info` and `POST /exchange`.
+- `internal/hl/rest`: REST client for `POST /info` (unauthenticated) and generic JSON helpers.
+- `internal/hl/exchange`: signed `/exchange` client (msgpack + EIP-712), matches official SDK behavior.
 - `internal/hl/ws`: WebSocket client with reconnect/resubscribe logic.
 - `internal/market`: market data abstraction (REST + WS) for mids/funding/vol.
 - `internal/account`: account reconciliation for spot balances, perp positions, open orders.
@@ -24,7 +26,7 @@
 ## Data and Control Flow
 - Startup:
   - REST reconcile (spot balances, perp positions, open orders).
-  - Start WS subscriptions for market data.
+  - Start WS subscriptions for market data and account state.
 - Runtime:
   - Strategy tick reads mid price, funding, volatility.
   - Risk checks gate entry/exit and position changes.
@@ -55,7 +57,7 @@ sequenceDiagram
         alt Enter/Exit required
             App->>Exec: PlaceOrder/CancelOrder
             Exec->>Store: Idempotency lookup
-            Exec->>REST: POST /exchange
+            Exec->>REST: POST /exchange (signed)
             Exec->>Store: Persist client order ID
         else No action
             Strategy-->>App: hold
@@ -68,6 +70,10 @@ sequenceDiagram
 - On startup, the app reconciles exposure and open orders before trading.
 - Roadmap includes persisting last action and exposure to harden recovery.
 
+## Trading Prerequisites (Operational Notes)
+- Spot orders require sufficient funds in the spot wallet (`spotClearinghouseState`); deposits may first appear under `clearinghouseState` and need to be transferred to spot.
+- Orders are subject to exchange constraints (observed on mainnet): minimum order value (10 USDC) and tick-size rules for price formatting.
+
 ## Interfaces and Testability
 - `internal/exec.RestClient` and `internal/state.Store` are small, mockable interfaces.
 - Unit tests cover state machine transitions, executor idempotency, and SQLite round trips.
@@ -75,12 +81,15 @@ sequenceDiagram
 ## Configuration
 - `internal/config/config.yaml` includes endpoints, timeouts, strategy thresholds, and risk limits.
 - Config defaults are applied in `internal/config/config.go`.
+- `ws.ping_interval` keeps WebSocket connections alive to avoid idle disconnects.
 
 ## Dependencies
 - Logging: `go.uber.org/zap`
 - YAML: `gopkg.in/yaml.v3`
 - SQLite: `modernc.org/sqlite`
 - WebSocket: `nhooyr.io/websocket`
+- Signing/crypto: `github.com/ethereum/go-ethereum`, `github.com/vmihailenco/msgpack/v5`
 
 ## Related Docs
 - `docs/roadmap.md`: product plan, state machine design, failure modes, and phased delivery.
+- `docs/handoff.md`: current repo state and next steps.

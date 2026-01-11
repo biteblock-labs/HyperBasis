@@ -20,6 +20,7 @@ type PerpContext struct {
 	FundingRate float64
 	OraclePrice float64
 	MarkPrice   float64
+	SzDecimals  int
 }
 
 type SpotContext struct {
@@ -88,7 +89,7 @@ func (m *MarketData) Start(ctx context.Context) error {
 	if m.ws == nil {
 		return nil
 	}
-	sub := map[string]any{"type": "subscribe", "subscription": map[string]any{"type": "allMids"}}
+	sub := map[string]any{"method": "subscribe", "subscription": map[string]any{"type": "allMids"}}
 	if err := m.ws.Connect(ctx); err != nil {
 		return err
 	}
@@ -114,7 +115,7 @@ func (m *MarketData) subscribeCandle(ctx context.Context) {
 		return
 	}
 	sub := map[string]any{
-		"type": "subscribe",
+		"method": "subscribe",
 		"subscription": map[string]any{
 			"type":     "candle",
 			"coin":     asset,
@@ -216,6 +217,13 @@ func (m *MarketData) SpotContext(asset string) (SpotContext, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	ctx, ok := m.spotCtx[asset]
+	return ctx, ok
+}
+
+func (m *MarketData) PerpContext(asset string) (PerpContext, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	ctx, ok := m.perpCtx[asset]
 	return ctx, ok
 }
 

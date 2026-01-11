@@ -94,7 +94,10 @@ If exposure exists and funding is bad: exit.
 - [x] Spot meta uses `tokens` mapping and many pair names are `@index`; derive base/quote from token indices.
 - [x] Spot mids can use `@index` keys; retain raw names for mid lookup.
 - [x] Asset IDs: perp uses universe index and spot uses 10000 + spot index (implemented per docs).
-- [ ] Partial fills: reconcile fills via WS events or user fills; hedge only the executed size; consider IOC for spot to avoid lingering partials.
+- [x] Signed `/exchange` order action verified on mainnet with a tiny spot IOC fill.
+- [x] Exchange constraints observed: minimum order value (10 USDC) and tick-size enforcement for price formatting.
+- [x] Funds placement matters: spot orders require spot wallet funds (`spotClearinghouseState`); perp wallet funds appear under `clearinghouseState`.
+- [x] Partial fills: reconcile fills via WS events or user fills; hedge only the executed size; consider IOC for spot to avoid lingering partials.
 - [ ] Funding timing: confirm hourly funding schedule and next funding timestamp; avoid closing right before a positive funding event unless risk dictates.
 - [ ] Funding data sources: verify availability and schema for `predictedFundings` and `userFunding` before relying on them.
 - [ ] Fees and slippage: compute expected carry net of fees/spread before entry; avoid churn when funding is low.
@@ -107,10 +110,12 @@ If exposure exists and funding is bad: exit.
 - [x] Phase 1: Populate funding rates, oracle prices, and spot context (validated against live `/info`).
 - [x] Phase 1: Implement candle volatility feed and calculations (tune window/interval as needed).
 - [x] Phase 2 (REST): Parse spot balances, perp positions, and open orders from /info.
-- [ ] Phase 2 (WS): Parse spot/perp/open-order updates from WebSocket feeds.
+- [x] Phase 2 (WS): Parse perp/open-order updates from WebSocket feeds.
+- [ ] Phase 2 (WS): Parse spot wallet updates from WebSocket feeds.
 - [ ] Phase 2: Persist last action and exposure in SQLite for restart safety.
 - [x] Phase 2: Add signed /exchange order action (EIP-712) and CLI verification order.
-- [ ] Phase 3: Add order timeouts, cancel/replace logic, and rollback on partial fills.
+- [x] Phase 2: Support USDC class transfers between perp/spot (needed to fund spot buys without draining perp margin).
+- [x] Phase 3: Add order timeouts, cancel-on-timeout, and rollback on partial fills.
 - [ ] Phase 3: Enforce reduce-only on exit.
 - [ ] Phase 4: Delta band checks, margin buffer thresholds, connectivity kill switch.
 - [ ] Phase 4: Funding regime rules and expected carry estimation.

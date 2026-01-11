@@ -75,6 +75,42 @@ func TestEncodeOrderActionDeterministic(t *testing.T) {
 	}
 }
 
+func TestEncodeCancelActionDeterministic(t *testing.T) {
+	action := CancelAction{Type: "cancel", Cancels: []CancelWire{{Asset: 1, OrderID: 123}}}
+	b1, err := EncodeCancelAction(action)
+	if err != nil {
+		t.Fatalf("encode error: %v", err)
+	}
+	b2, err := EncodeCancelAction(action)
+	if err != nil {
+		t.Fatalf("encode error: %v", err)
+	}
+	if !bytes.Equal(b1, b2) {
+		t.Fatalf("expected deterministic encoding")
+	}
+	var decoded map[string]any
+	if err := msgpack.Unmarshal(b1, &decoded); err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+	if decoded["type"] != "cancel" {
+		t.Fatalf("unexpected action type")
+	}
+	cancels, ok := decoded["cancels"].([]any)
+	if !ok || len(cancels) != 1 {
+		t.Fatalf("expected 1 cancel")
+	}
+	cancelMap, ok := cancels[0].(map[string]any)
+	if !ok {
+		t.Fatalf("expected cancel map")
+	}
+	if got := intFromAny(cancelMap["a"]); got != 1 {
+		t.Fatalf("expected asset 1, got %d", got)
+	}
+	if got := intFromAny(cancelMap["o"]); got != 123 {
+		t.Fatalf("expected order id 123, got %d", got)
+	}
+}
+
 func TestSignerRecover(t *testing.T) {
 	signer, err := NewSigner("4f3edf983ac636a65a842ce7c78d9aa706d3b113bce036f81af8f9b72d3d80b2", true)
 	if err != nil {
@@ -96,6 +132,42 @@ func TestSignerRecover(t *testing.T) {
 	}
 	aHash := actionHash(payload, nonce, nil, nil)
 	digest, err := typedDataHash(aHash, true)
+	if err != nil {
+		t.Fatalf("digest error: %v", err)
+	}
+	sigBytes, err := signatureBytes(sig)
+	if err != nil {
+		t.Fatalf("signature bytes error: %v", err)
+	}
+	pubKey, err := crypto.SigToPub(digest, sigBytes)
+	if err != nil {
+		t.Fatalf("recover error: %v", err)
+	}
+	recovered := crypto.PubkeyToAddress(*pubKey)
+	if recovered != signer.Address() {
+		t.Fatalf("expected %s, got %s", signer.Address().Hex(), recovered.Hex())
+	}
+}
+
+func TestSignerRecoverUSDClassTransfer(t *testing.T) {
+	signer, err := NewSigner("4f3edf983ac636a65a842ce7c78d9aa706d3b113bce036f81af8f9b72d3d80b2", true)
+	if err != nil {
+		t.Fatalf("signer error: %v", err)
+	}
+	action := USDClassTransferAction{
+		Type:   "usdClassTransfer",
+		Amount: "12.34",
+		ToPerp: true,
+		Nonce:  1700000000000,
+	}
+	sig, err := signer.SignUSDClassTransfer(&action)
+	if err != nil {
+		t.Fatalf("sign error: %v", err)
+	}
+	if action.SignatureChainID == "" || action.HyperliquidChain == "" {
+		t.Fatalf("expected signature chain fields to be set")
+	}
+	digest, err := userSignedTypedDataHash(action)
 	if err != nil {
 		t.Fatalf("digest error: %v", err)
 	}
@@ -136,3 +208,30 @@ func signatureBytes(sig Signature) ([]byte, error) {
 
 var errUnexpectedSigLen = errors.New("unexpected signature length")
 var errUnexpectedSigV = errors.New("unexpected signature v")
+
+func intFromAny(v any) int {
+	switch val := v.(type) {
+	case int:
+		return val
+	case int64:
+		return int(val)
+	case uint64:
+		return int(val)
+	case int32:
+		return int(val)
+	case int16:
+		return int(val)
+	case int8:
+		return int(val)
+	case uint32:
+		return int(val)
+	case uint16:
+		return int(val)
+	case uint8:
+		return int(val)
+	case uint:
+		return int(val)
+	default:
+		return 0
+	}
+}

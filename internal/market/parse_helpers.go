@@ -31,6 +31,7 @@ func parsePerpContexts(payload any) (map[string]PerpContext, error) {
 			FundingRate: floatFromMap(ctx, "funding", "fundingRate"),
 			OraclePrice: floatFromMap(ctx, "oraclePx", "oraclePrice", "oracle"),
 			MarkPrice:   floatFromMap(ctx, "markPx", "markPrice", "mark"),
+			SzDecimals:  intFromAny(meta["szDecimals"], -1),
 		}
 	}
 	if len(result) == 0 {
