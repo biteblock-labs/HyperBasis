@@ -39,20 +39,26 @@ type MarketData struct {
 	ws   *ws.Client
 	log  *zap.Logger
 
-	mu               sync.RWMutex
-	midPrices        map[string]float64
-	funding          map[string]float64
-	oraclePrices     map[string]float64
-	volatility       map[string]float64
-	perpCtx          map[string]PerpContext
-	spotCtx          map[string]SpotContext
-	candleCloses     map[string][]float64
-	lastCtxRefresh   time.Time
-	ctxRefreshWindow time.Duration
+	mu                 sync.RWMutex
+	midPrices          map[string]float64
+	funding            map[string]float64
+	oraclePrices       map[string]float64
+	volatility         map[string]float64
+	perpCtx            map[string]PerpContext
+	spotCtx            map[string]SpotContext
+	candleCloses       map[string][]float64
+	lastCtxRefresh     time.Time
+	lastMidUpdate      time.Time
+	lastFundingFetch   time.Time
+	lastFundingAttempt time.Time
+	ctxRefreshWindow   time.Duration
+	fundingWindow      time.Duration
 
 	candleAsset    string
 	candleInterval string
 	candleWindow   int
+
+	fundingForecasts map[string]FundingForecast
 }
 
 func New(restClient *rest.Client, wsClient *ws.Client, log *zap.Logger) *MarketData {
@@ -68,8 +74,10 @@ func New(restClient *rest.Client, wsClient *ws.Client, log *zap.Logger) *MarketD
 		spotCtx:          make(map[string]SpotContext),
 		candleCloses:     make(map[string][]float64),
 		ctxRefreshWindow: 30 * time.Second,
+		fundingWindow:    60 * time.Second,
 		candleWindow:     20,
 		candleInterval:   "1h",
+		fundingForecasts: make(map[string]FundingForecast),
 	}
 }
 
@@ -199,6 +207,12 @@ func (m *MarketData) Mid(ctx context.Context, asset string) (float64, error) {
 	return price, nil
 }
 
+func (m *MarketData) LastMidUpdate() time.Time {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.lastMidUpdate
+}
+
 func (m *MarketData) FundingRate(asset string) (float64, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -292,10 +306,15 @@ func (m *MarketData) updateMids(payload map[string]any) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	updated := false
 	for asset, v := range mids {
 		if f, ok := floatFromAny(v); ok {
 			m.midPrices[asset] = f
+			updated = true
 		}
+	}
+	if updated {
+		m.lastMidUpdate = time.Now().UTC()
 	}
 }
 

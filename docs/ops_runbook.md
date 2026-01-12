@@ -23,9 +23,9 @@ Notable limitations (as of this repo state):
 - **EXIT flow is safer but not foolproof**: the bot sizes from actual exposure, skips dust below `strategy.min_exposure_usd`, waits for fills (cancel on timeout), closes the perp leg with reduce-only, and rolls back spot on failures/partial fills before marking the state done. If rollback fails, manual intervention may still be required.
 - **Spot balance tracking is snapshot+delta-based**: `userNonFundingLedgerUpdates` applies spot deltas and the bot periodically reconciles via `spotClearinghouseState` (tune `strategy.spot_reconcile_interval` as needed).
 - **Restart behavior is improved**: the bot persists a strategy snapshot (last action + exposure + last mids) to SQLite and restores the state machine on startup (including promoting IDLE → HEDGE_OK when exposure exists), but steady-state delta management is still minimal.
-- Risk checks are currently minimal (notional/open-orders) and do not yet include margin health, connectivity kill-switches, or fee-aware carry estimates.
+- Risk checks include margin/health thresholds, a connectivity kill switch, fee-aware carry estimation, and funding-regime confirmations.
 
-Recommendation: treat this bot as **supervised** until the roadmap items in `docs/roadmap.md` Phase 4+ are complete (delta-band hedging, margin/health checks, connectivity kill switch, fee-aware carry).
+Recommendation: treat this bot as **supervised** until live funding verification and operator controls (Telegram commands + dashboards) are in place.
 
 ## Repo Quick Reference
 
@@ -57,6 +57,10 @@ Required for the bot:
 Optional:
 - `HL_ACCOUNT_ADDRESS`: the account to subscribe to for account state (defaults to wallet address)
 - `HL_VAULT_ADDRESS`: subaccount/vault address used for signed `/exchange` actions (if applicable)
+- `HL_TELEGRAM_TOKEN`: bot token (used when `telegram.enabled` is true)
+- `HL_TELEGRAM_CHAT_ID`: chat or channel id (bot must be admin for channels)
+
+Telegram alerts are disabled unless `telegram.enabled` is true in config; `.env` only supplies credentials.
 
 See `.env.example` for the full template.
 
@@ -66,9 +70,14 @@ The bot is configured via YAML (see `internal/config/config.yaml`).
 
 Key settings:
 - `rest.base_url`: `https://api.hyperliquid.xyz` (mainnet) or testnet URL
-- `ws.url`: `wss://api.hyperliquid.xyz/ws`
 - `ws.ping_interval`: keepalive for idle WS connections (default is 50s)
 - `state.sqlite_path`: local SQLite KV store path (default `data/hl-carry-bot.db`)
+- `metrics.enabled`: expose Prometheus metrics when true (default true)
+- `metrics.address`: listen address for metrics (default `127.0.0.1:9001`)
+- `metrics.path`: HTTP path for metrics (default `/metrics`)
+- `telegram.enabled`: enable Telegram alerts (must be true to send)
+- `HL_TELEGRAM_TOKEN`: bot token (keep secret, stored in `.env`)
+- `HL_TELEGRAM_CHAT_ID`: chat or channel id (bot must be admin for channels, stored in `.env`)
 
 Strategy settings:
 - `strategy.perp_asset`: perp symbol (e.g., `BTC`)
@@ -76,15 +85,27 @@ Strategy settings:
 - `strategy.notional_usd`: desired notional for the position sizing
 - `strategy.min_funding_rate`: minimum funding rate to consider entry
 - `strategy.max_volatility`: volatility gate (from candle feed)
+- `strategy.fee_bps`: estimated per-leg fee (basis points), used for carry estimation
+- `strategy.slippage_bps`: estimated per-leg slippage (basis points), used for carry estimation
+- `strategy.carry_buffer_usd`: extra USD buffer required after estimated costs
+- `strategy.funding_confirmations`: consecutive ticks above thresholds before entry
+- `strategy.funding_dip_confirmations`: consecutive ticks below thresholds before exit
+- `strategy.delta_band_usd`: delta drift band before re-hedging with perp IOC
 - `strategy.min_exposure_usd`: treat smaller residuals as dust to avoid tiny exit orders / 422s
 - `strategy.entry_interval`: how often to evaluate entry/exit
 - `strategy.spot_reconcile_interval`: periodic spot balance refresh cadence (WS post `spotClearinghouseState`)
 - `strategy.entry_timeout` / `strategy.entry_poll_interval`: how long to wait for entry fills
 - `strategy.exit_on_funding_dip`: whether to exit when expected funding drops below threshold
+- `strategy.exit_funding_guard`: minimum time before `nextFundingTime` to defer exits when predicted funding is positive
+- `strategy.exit_funding_guard_enabled`: toggle for the exit funding guard (default true)
 
 Risk settings (currently enforced in code):
 - `risk.max_notional_usd`
 - `risk.max_open_orders`
+- `risk.min_margin_ratio`: gate trading when reported margin ratio falls below this threshold
+- `risk.min_health_ratio`: gate trading when account health ratio falls below this threshold
+- `risk.max_market_age`: kill switch if market data age exceeds this window
+- `risk.max_account_age`: kill switch if account data age exceeds this window
 
 Spot balance source:
 - `spotClearinghouseState` is an `/info` request (HTTP) and can also be called via WebSocket `method: "post"`. It is not a WS subscription type.
@@ -194,8 +215,9 @@ In practice, you must account for:
 ## Next Steps (Roadmap Alignment)
 
 For “unattended” production readiness, prioritize:
-- Delta-band re-hedging and steady-state exposure management in HEDGE_OK.
-- More comprehensive risk controls: margin/health checks and a connectivity kill switch.
-- Fee-aware carry estimation and funding-regime rules.
+- Live `userFunding` verification once the bot holds exposure across a funding event.
+- Telegram operator controls.
+- TimescaleDB + Grafana candlestick/position dashboards.
+- Systemd hardening and config management.
 
 See `docs/roadmap.md` and `docs/handoff.md`.

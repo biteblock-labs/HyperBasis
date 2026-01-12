@@ -18,12 +18,13 @@ Hyperliquid delta-neutral funding-rate carry bot scaffold (long spot + short per
 - `docs/ops_runbook.md`: operations runbook (deployment + troubleshooting)
 
 ## Architecture Summary
-The bot wires configuration + logging, reconciles account state at startup, consumes REST/WS market data, and runs a state machine that gates entry/exit while enforcing risk checks. Orders flow through an idempotent executor backed by a persistent store; the store also persists exchange nonces and a strategy snapshot (last action + exposure + last mids) to make restarts safer. Spot balances are maintained with WS ledger deltas plus periodic WS post snapshots.
+The bot wires configuration + logging, reconciles account state at startup, consumes REST/WS market data, and runs a state machine that gates entry/exit while enforcing risk + connectivity checks (delta-band re-hedging, margin/health thresholds, and a stale-data kill switch). Orders flow through an idempotent executor backed by a persistent store; the store also persists exchange nonces and a strategy snapshot (last action + exposure + last mids) to make restarts safer. Spot balances are maintained with WS ledger deltas plus periodic WS post snapshots.
 
 ## Quick start
 1. Copy `internal/config/config.yaml` and adjust settings (notably `strategy.perp_asset` and `strategy.spot_asset`).
-2. Build: `make build`
-3. Run: `./bin/hl-carry-bot -config internal/config/config.yaml`
+2. Create `.env` from `.env.example` (or export env vars) and set `HL_WALLET_ADDRESS` + `HL_PRIVATE_KEY` (and optional `HL_TELEGRAM_TOKEN`/`HL_TELEGRAM_CHAT_ID` if alerts are enabled).
+3. Build: `make build`
+4. Run: `./bin/hl-carry-bot -config internal/config/config.yaml`
 
 ## Verification order (optional)
 1. Copy `.env.example` to `.env` and fill in `HL_WALLET_ADDRESS` + `HL_PRIVATE_KEY` (do not commit `.env`).
@@ -44,6 +45,8 @@ The bot wires configuration + logging, reconciles account state at startup, cons
 - The bot persists a strategy snapshot (last action + exposure + last mids) to SQLite and restores strategy state on startup when available.
 - `strategy.min_exposure_usd` treats small residual exposure as dust to avoid tiny exit orders / 422s.
 - Spot balances are refreshed via WS post `spotClearinghouseState` and delta-updated via `userNonFundingLedgerUpdates`; reconcile cadence is `strategy.spot_reconcile_interval`.
+- Prometheus metrics are enabled by default on `127.0.0.1:9001` (`metrics.path` is `/metrics`); set `metrics.enabled` to false to disable.
+- Telegram Bot API alerts are available when `telegram.enabled` is true and `HL_TELEGRAM_TOKEN`/`HL_TELEGRAM_CHAT_ID` are set (from `.env` or environment).
 - Placeholder types are used where schemas are unknown.
 
 ## Testing

@@ -1,17 +1,21 @@
 log:
-  level: info
+  level: debug
 
 rest:
   base_url: https://api.hyperliquid.xyz
   timeout: 10s
 
 ws:
-  url: wss://api.hyperliquid.xyz/ws
   reconnect_delay: 3s
   ping_interval: 50s
 
 state:
   sqlite_path: data/hl-carry-bot.db
+
+metrics:
+  enabled: true
+  address: 127.0.0.1:9001
+  path: /metrics
 
 strategy:
   perp_asset: BTC
@@ -19,20 +23,30 @@ strategy:
   notional_usd: 1000
   min_funding_rate: 0.0002
   max_volatility: 0.02
+  fee_bps: 0
+  slippage_bps: 0
+  carry_buffer_usd: 0
+  funding_confirmations: 1
+  funding_dip_confirmations: 1
+  delta_band_usd: 5
   min_exposure_usd: 10
   entry_interval: 30s
   spot_reconcile_interval: 5m
   entry_timeout: 5s
   entry_poll_interval: 250ms
   exit_on_funding_dip: true
+  exit_funding_guard: 2m
+  exit_funding_guard_enabled: true
   candle_interval: 1h
   candle_window: 24
 
 risk:
   max_notional_usd: 5000
   max_open_orders: 10
+  min_margin_ratio: 0
+  min_health_ratio: 0
+  max_market_age: 2m
+  max_account_age: 10m
 
 telegram:
-  enabled: false
-  token: ""
-  chat_id: ""
+  enabled: true

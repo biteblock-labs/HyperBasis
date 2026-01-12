@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -12,12 +13,15 @@ import (
 	"strings"
 	"time"
 
+	"hl-carry-bot/internal/account"
 	"hl-carry-bot/internal/config"
 	"hl-carry-bot/internal/hl/exchange"
 	"hl-carry-bot/internal/hl/rest"
 	"hl-carry-bot/internal/logging"
 	"hl-carry-bot/internal/market"
 	"hl-carry-bot/internal/state/sqlite"
+
+	"go.uber.org/zap"
 )
 
 const (
@@ -32,6 +36,9 @@ const (
 func main() {
 	configPath := flag.String("config", "", "optional config path for REST settings")
 	dryRun := flag.Bool("dry-run", false, "print the derived order and exit")
+	userFunding := flag.Bool("user-funding", false, "fetch and print /info userFunding and exit")
+	fundingStartMS := flag.Int64("funding-start-ms", 0, "startTime (ms since epoch) for userFunding query")
+	fundingHours := flag.Int("funding-hours", 0, "lookback hours for userFunding query (used if funding-start-ms is 0)")
 	flag.Parse()
 
 	if err := config.LoadEnv(defaultVerifyEnvFile); err != nil {
@@ -59,6 +66,11 @@ func main() {
 
 	log := logging.New(logCfg)
 	defer func() { _ = log.Sync() }()
+
+	if *userFunding {
+		runUserFunding(log, baseURL, timeout, *fundingStartMS, *fundingHours)
+		return
+	}
 
 	asset := strings.TrimSpace(os.Getenv("HL_VERIFY_ASSET"))
 	if asset == "" && cfg != nil {
@@ -197,6 +209,47 @@ func main() {
 		return
 	}
 	fmt.Printf("exchange response: %v\n", resp)
+}
+
+func runUserFunding(log *zap.Logger, baseURL string, timeout time.Duration, startTimeMS int64, lookbackHours int) {
+	wallet := strings.TrimSpace(os.Getenv("HL_WALLET_ADDRESS"))
+	if wallet == "" {
+		fatal(errors.New("HL_WALLET_ADDRESS is required"))
+	}
+	if startTimeMS <= 0 && lookbackHours > 0 {
+		startTimeMS = time.Now().Add(-time.Duration(lookbackHours) * time.Hour).UnixMilli()
+	}
+	req := map[string]any{
+		"type": "userFunding",
+		"user": wallet,
+	}
+	if startTimeMS > 0 {
+		req["startTime"] = startTimeMS
+	}
+	restClient := rest.New(baseURL, timeout, log)
+	accountClient := account.New(restClient, nil, log, wallet)
+	queryStart := startTimeMS
+	if queryStart <= 0 {
+		queryStart = -1
+	}
+	entries, err := accountClient.UserFunding(context.Background(), queryStart)
+	if err != nil {
+		fatal(err)
+	}
+	entryCount := 0
+	if entries != nil {
+		entryCount = len(entries)
+	}
+	fmt.Printf("userFunding entries: %d\n", entryCount)
+	payload, err := restClient.InfoAny(context.Background(), req)
+	if err != nil {
+		fatal(err)
+	}
+	pretty, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		fatal(err)
+	}
+	fmt.Printf("userFunding response:\n%s\n", string(pretty))
 }
 
 func midWithFallback(ctx context.Context, md *market.MarketData, spotCtx market.SpotContext, asset string) (float64, error) {

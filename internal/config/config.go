@@ -2,7 +2,9 @@ package config
 
 import (
 	"errors"
+	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -13,6 +15,7 @@ type Config struct {
 	REST     RESTConfig     `yaml:"rest"`
 	WS       WSConfig       `yaml:"ws"`
 	State    StateConfig    `yaml:"state"`
+	Metrics  MetricsConfig  `yaml:"metrics"`
 	Strategy StrategyConfig `yaml:"strategy"`
 	Risk     RiskConfig     `yaml:"risk"`
 	Telegram TelegramConfig `yaml:"telegram"`
@@ -37,26 +40,51 @@ type StateConfig struct {
 	SQLitePath string `yaml:"sqlite_path"`
 }
 
+type MetricsConfig struct {
+	Enabled *bool  `yaml:"enabled"`
+	Address string `yaml:"address"`
+	Path    string `yaml:"path"`
+}
+
+func (m MetricsConfig) EnabledValue() bool {
+	if m.Enabled == nil {
+		return true
+	}
+	return *m.Enabled
+}
+
 type StrategyConfig struct {
-	Asset                 string        `yaml:"asset"`
-	PerpAsset             string        `yaml:"perp_asset"`
-	SpotAsset             string        `yaml:"spot_asset"`
-	NotionalUSD           float64       `yaml:"notional_usd"`
-	MinFundingRate        float64       `yaml:"min_funding_rate"`
-	MaxVolatility         float64       `yaml:"max_volatility"`
-	MinExposureUSD        float64       `yaml:"min_exposure_usd"`
-	EntryInterval         time.Duration `yaml:"entry_interval"`
-	SpotReconcileInterval time.Duration `yaml:"spot_reconcile_interval"`
-	EntryTimeout          time.Duration `yaml:"entry_timeout"`
-	EntryPollInterval     time.Duration `yaml:"entry_poll_interval"`
-	ExitOnFundingDip      bool          `yaml:"exit_on_funding_dip"`
-	CandleInterval        string        `yaml:"candle_interval"`
-	CandleWindow          int           `yaml:"candle_window"`
+	Asset                   string        `yaml:"asset"`
+	PerpAsset               string        `yaml:"perp_asset"`
+	SpotAsset               string        `yaml:"spot_asset"`
+	NotionalUSD             float64       `yaml:"notional_usd"`
+	MinFundingRate          float64       `yaml:"min_funding_rate"`
+	MaxVolatility           float64       `yaml:"max_volatility"`
+	FeeBps                  float64       `yaml:"fee_bps"`
+	SlippageBps             float64       `yaml:"slippage_bps"`
+	CarryBufferUSD          float64       `yaml:"carry_buffer_usd"`
+	FundingConfirmations    int           `yaml:"funding_confirmations"`
+	FundingDipConfirmations int           `yaml:"funding_dip_confirmations"`
+	DeltaBandUSD            float64       `yaml:"delta_band_usd"`
+	MinExposureUSD          float64       `yaml:"min_exposure_usd"`
+	EntryInterval           time.Duration `yaml:"entry_interval"`
+	SpotReconcileInterval   time.Duration `yaml:"spot_reconcile_interval"`
+	EntryTimeout            time.Duration `yaml:"entry_timeout"`
+	EntryPollInterval       time.Duration `yaml:"entry_poll_interval"`
+	ExitOnFundingDip        bool          `yaml:"exit_on_funding_dip"`
+	ExitFundingGuard        time.Duration `yaml:"exit_funding_guard"`
+	ExitFundingGuardEnabled *bool         `yaml:"exit_funding_guard_enabled"`
+	CandleInterval          string        `yaml:"candle_interval"`
+	CandleWindow            int           `yaml:"candle_window"`
 }
 
 type RiskConfig struct {
-	MaxNotionalUSD float64 `yaml:"max_notional_usd"`
-	MaxOpenOrders  int     `yaml:"max_open_orders"`
+	MaxNotionalUSD float64       `yaml:"max_notional_usd"`
+	MaxOpenOrders  int           `yaml:"max_open_orders"`
+	MinMarginRatio float64       `yaml:"min_margin_ratio"`
+	MinHealthRatio float64       `yaml:"min_health_ratio"`
+	MaxMarketAge   time.Duration `yaml:"max_market_age"`
+	MaxAccountAge  time.Duration `yaml:"max_account_age"`
 }
 
 type TelegramConfig struct {
@@ -78,6 +106,7 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 	applyDefaults(&cfg)
+	applyEnvOverrides(&cfg)
 	return &cfg, validate(&cfg)
 }
 
@@ -92,7 +121,11 @@ func applyDefaults(cfg *Config) {
 		cfg.REST.Timeout = 10 * time.Second
 	}
 	if cfg.WS.URL == "" {
-		cfg.WS.URL = "wss://api.hyperliquid.xyz/ws"
+		if derived := deriveWSURL(cfg.REST.BaseURL); derived != "" {
+			cfg.WS.URL = derived
+		} else {
+			cfg.WS.URL = "wss://api.hyperliquid.xyz/ws"
+		}
 	}
 	if cfg.WS.ReconnectDelay == 0 {
 		cfg.WS.ReconnectDelay = 3 * time.Second
@@ -103,11 +136,30 @@ func applyDefaults(cfg *Config) {
 	if cfg.State.SQLitePath == "" {
 		cfg.State.SQLitePath = "data/hl-carry-bot.db"
 	}
+	if cfg.Metrics.Enabled == nil {
+		enabled := true
+		cfg.Metrics.Enabled = &enabled
+	}
+	if cfg.Metrics.Address == "" {
+		cfg.Metrics.Address = "127.0.0.1:9001"
+	}
+	if cfg.Metrics.Path == "" {
+		cfg.Metrics.Path = "/metrics"
+	}
 	if cfg.Strategy.EntryInterval == 0 {
 		cfg.Strategy.EntryInterval = 30 * time.Second
 	}
 	if cfg.Strategy.SpotReconcileInterval == 0 {
 		cfg.Strategy.SpotReconcileInterval = 5 * time.Minute
+	}
+	if cfg.Strategy.FundingConfirmations == 0 {
+		cfg.Strategy.FundingConfirmations = 1
+	}
+	if cfg.Strategy.FundingDipConfirmations == 0 {
+		cfg.Strategy.FundingDipConfirmations = 1
+	}
+	if cfg.Strategy.DeltaBandUSD == 0 {
+		cfg.Strategy.DeltaBandUSD = 5
 	}
 	if cfg.Strategy.MinExposureUSD == 0 {
 		cfg.Strategy.MinExposureUSD = 10
@@ -117,6 +169,13 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Strategy.EntryPollInterval == 0 {
 		cfg.Strategy.EntryPollInterval = 250 * time.Millisecond
+	}
+	if cfg.Strategy.ExitFundingGuard == 0 {
+		cfg.Strategy.ExitFundingGuard = 2 * time.Minute
+	}
+	if cfg.Strategy.ExitFundingGuardEnabled == nil {
+		enabled := true
+		cfg.Strategy.ExitFundingGuardEnabled = &enabled
 	}
 	if cfg.Strategy.CandleInterval == "" {
 		cfg.Strategy.CandleInterval = "1h"
@@ -134,6 +193,54 @@ func applyDefaults(cfg *Config) {
 			cfg.Strategy.SpotAsset = cfg.Strategy.PerpAsset
 		}
 	}
+	if cfg.Risk.MaxMarketAge == 0 {
+		cfg.Risk.MaxMarketAge = 2 * time.Minute
+	}
+	if cfg.Risk.MaxAccountAge == 0 {
+		if cfg.Strategy.SpotReconcileInterval > 0 {
+			cfg.Risk.MaxAccountAge = cfg.Strategy.SpotReconcileInterval * 2
+		} else {
+			cfg.Risk.MaxAccountAge = 10 * time.Minute
+		}
+	}
+}
+
+func applyEnvOverrides(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	if token := strings.TrimSpace(os.Getenv("HL_TELEGRAM_TOKEN")); token != "" {
+		cfg.Telegram.Token = token
+	}
+	if chatID := strings.TrimSpace(os.Getenv("HL_TELEGRAM_CHAT_ID")); chatID != "" {
+		cfg.Telegram.ChatID = chatID
+	}
+}
+
+func deriveWSURL(restBase string) string {
+	restBase = strings.TrimSpace(restBase)
+	if restBase == "" {
+		return ""
+	}
+	parsed, err := url.Parse(restBase)
+	if err != nil || parsed.Host == "" {
+		return ""
+	}
+	switch strings.ToLower(parsed.Scheme) {
+	case "http":
+		parsed.Scheme = "ws"
+	case "https":
+		parsed.Scheme = "wss"
+	}
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	path := strings.TrimRight(parsed.Path, "/")
+	if path == "" {
+		parsed.Path = "/ws"
+	} else {
+		parsed.Path = path + "/ws"
+	}
+	return parsed.String()
 }
 
 func validate(cfg *Config) error {
@@ -155,11 +262,52 @@ func validate(cfg *Config) error {
 	if cfg.Strategy.MinExposureUSD < 0 {
 		return errors.New("strategy.min_exposure_usd must be >= 0")
 	}
+	if cfg.Strategy.FeeBps < 0 {
+		return errors.New("strategy.fee_bps must be >= 0")
+	}
+	if cfg.Strategy.SlippageBps < 0 {
+		return errors.New("strategy.slippage_bps must be >= 0")
+	}
+	if cfg.Strategy.CarryBufferUSD < 0 {
+		return errors.New("strategy.carry_buffer_usd must be >= 0")
+	}
+	if cfg.Strategy.FundingConfirmations < 1 {
+		return errors.New("strategy.funding_confirmations must be >= 1")
+	}
+	if cfg.Strategy.FundingDipConfirmations < 1 {
+		return errors.New("strategy.funding_dip_confirmations must be >= 1")
+	}
+	if cfg.Strategy.DeltaBandUSD < 0 {
+		return errors.New("strategy.delta_band_usd must be >= 0")
+	}
 	if cfg.Strategy.SpotReconcileInterval < 0 {
 		return errors.New("strategy.spot_reconcile_interval must be >= 0")
 	}
+	if cfg.Strategy.ExitFundingGuard < 0 {
+		return errors.New("strategy.exit_funding_guard must be >= 0")
+	}
+	if cfg.Metrics.Path == "" || !strings.HasPrefix(cfg.Metrics.Path, "/") {
+		return errors.New("metrics.path must start with /")
+	}
+	if cfg.Risk.MinMarginRatio < 0 {
+		return errors.New("risk.min_margin_ratio must be >= 0")
+	}
+	if cfg.Risk.MinHealthRatio < 0 {
+		return errors.New("risk.min_health_ratio must be >= 0")
+	}
+	if cfg.Risk.MaxMarketAge < 0 {
+		return errors.New("risk.max_market_age must be >= 0")
+	}
+	if cfg.Risk.MaxAccountAge < 0 {
+		return errors.New("risk.max_account_age must be >= 0")
+	}
 	if cfg.Risk.MaxNotionalUSD > 0 && cfg.Strategy.NotionalUSD > cfg.Risk.MaxNotionalUSD {
 		return errors.New("strategy.notional_usd exceeds risk.max_notional_usd")
+	}
+	if cfg.Telegram.Enabled {
+		if strings.TrimSpace(cfg.Telegram.Token) == "" || strings.TrimSpace(cfg.Telegram.ChatID) == "" {
+			return errors.New("telegram token and chat_id are required when telegram.enabled is true (set HL_TELEGRAM_TOKEN and HL_TELEGRAM_CHAT_ID)")
+		}
 	}
 	return nil
 }

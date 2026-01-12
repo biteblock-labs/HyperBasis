@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -28,21 +29,28 @@ import (
 )
 
 type App struct {
-	cfg      *config.Config
-	log      *zap.Logger
-	store    *sqlite.Store
-	rest     *rest.Client
-	ws       *ws.Client
-	exchange *exchange.Client
-	market   *market.MarketData
-	account  *account.Account
-	executor *exec.Executor
-	metrics  *metrics.Metrics
-	alerts   *alerts.Telegram
-	strategy *strategy.StateMachine
+	cfg           *config.Config
+	log           *zap.Logger
+	store         *sqlite.Store
+	rest          *rest.Client
+	ws            *ws.Client
+	exchange      *exchange.Client
+	market        *market.MarketData
+	account       *account.Account
+	executor      *exec.Executor
+	metrics       *metrics.Metrics
+	metricsServer *http.Server
+	metricsAddr   string
+	metricsPath   string
+	alerts        *alerts.Telegram
+	strategy      *strategy.StateMachine
 
 	snapshotPersistWarned bool
 	spotRefreshWarned     bool
+	killSwitchActive      bool
+	fundingOKCount        int
+	fundingBadCount       int
+	fundingForecastWarned bool
 }
 
 const (
@@ -93,26 +101,45 @@ func New(cfg *config.Config, log *zap.Logger) (*App, error) {
 	accountWS := ws.New(cfg.WS.URL, cfg.WS.ReconnectDelay, cfg.WS.PingInterval, log)
 	accountClient := account.New(restClient, accountWS, log, accountAddress)
 	executor := exec.New(&exchangeAdapter{client: exClient, tif: exchange.TifGtc}, store, log)
-	metrics := metrics.NewNoop()
-	alertsClient := alerts.NewTelegram(cfg.Telegram.Enabled, log)
+	metricsClient := metrics.NewNoop()
+	var metricsServer *http.Server
+	metricsAddr := ""
+	metricsPath := ""
+	if cfg.Metrics.EnabledValue() {
+		prom := metrics.NewPrometheus()
+		metricsClient = prom.Metrics
+		metricsAddr = cfg.Metrics.Address
+		metricsPath = cfg.Metrics.Path
+		mux := http.NewServeMux()
+		mux.Handle(metricsPath, prom.Handler())
+		metricsServer = &http.Server{
+			Addr:    metricsAddr,
+			Handler: mux,
+		}
+	}
+	alertsClient := alerts.NewTelegram(cfg.Telegram, log)
 	return &App{
-		cfg:      cfg,
-		log:      log,
-		store:    store,
-		rest:     restClient,
-		ws:       wsClient,
-		exchange: exClient,
-		market:   marketData,
-		account:  accountClient,
-		executor: executor,
-		metrics:  metrics,
-		alerts:   alertsClient,
-		strategy: strategy.NewStateMachine(),
+		cfg:           cfg,
+		log:           log,
+		store:         store,
+		rest:          restClient,
+		ws:            wsClient,
+		exchange:      exClient,
+		market:        marketData,
+		account:       accountClient,
+		executor:      executor,
+		metrics:       metricsClient,
+		metricsServer: metricsServer,
+		metricsAddr:   metricsAddr,
+		metricsPath:   metricsPath,
+		alerts:        alertsClient,
+		strategy:      strategy.NewStateMachine(),
 	}, nil
 }
 
 func (a *App) Run(ctx context.Context) error {
 	defer a.store.Close()
+	a.startMetricsServer(ctx)
 	if a.exchange != nil && a.store != nil {
 		if err := a.exchange.InitNonceStore(ctx, a.store); err != nil {
 			a.log.Warn("nonce store init failed", zap.Error(err))
@@ -190,6 +217,7 @@ func (a *App) Run(ctx context.Context) error {
 	if err := a.market.RefreshContexts(ctx); err != nil {
 		a.log.Warn("context refresh failed", zap.Error(err))
 	}
+	a.refreshFundingForecast(ctx)
 	if a.log != nil {
 		a.log.Info("startup: complete")
 	}
@@ -216,6 +244,7 @@ func (a *App) tick(ctx context.Context) error {
 	if err := a.market.RefreshContexts(ctx); err != nil {
 		a.log.Warn("context refresh failed", zap.Error(err))
 	}
+	a.refreshFundingForecast(ctx)
 	perpAsset := a.cfg.Strategy.PerpAsset
 	spotAsset := a.cfg.Strategy.SpotAsset
 	spotMid, spotCtx, err := a.spotMid(ctx, spotAsset)
@@ -249,13 +278,41 @@ func (a *App) tick(ctx context.Context) error {
 		PerpPosition:   perpPosition,
 		OpenOrderCount: len(accountSnap.OpenOrders),
 	}
+	if accountSnap.HasMarginSummary {
+		snap.MarginRatio = accountSnap.MarginSummary.MarginRatio
+		snap.HealthRatio = accountSnap.MarginSummary.HealthRatio
+		snap.HasMarginRatio = accountSnap.MarginSummary.HasMarginRatio
+		snap.HasHealthRatio = accountSnap.MarginSummary.HasHealthRatio
+	}
 	defer a.persistStrategySnapshot(ctx, snap)
 	flatStrict := isFlat(spotBalance, perpPosition)
 	flat := a.isExposureFlat(spotBalance, perpPosition, spotMid, perpMid)
 	spotExposureUSD := math.Abs(spotBalance) * spotMid
 	perpExposureUSD := math.Abs(perpPosition) * perpMid
+	priceRef := snap.OraclePrice
+	if priceRef == 0 {
+		priceRef = snap.PerpMidPrice
+	}
+	if priceRef == 0 {
+		priceRef = snap.SpotMidPrice
+	}
+	deltaUSD := (spotBalance + perpPosition) * priceRef
+	marketAge := time.Duration(0)
+	if a.market != nil {
+		marketAge = time.Since(a.market.LastMidUpdate())
+	}
+	accountAge := time.Duration(0)
+	if a.account != nil {
+		accountAge = time.Since(a.account.LastUpdate())
+	}
+	forecast, hasForecast := a.market.FundingForecast(perpAsset)
 	minExpectedFunding := snap.NotionalUSD * a.cfg.Strategy.MinFundingRate
 	expectedFunding := strategy.FundingPaymentEstimateUSD(snap)
+	netCarryUSD, estimatedCostUSD := strategy.NetExpectedCarryUSD(snap, a.cfg.Strategy.FeeBps, a.cfg.Strategy.SlippageBps)
+	carryBufferUSD := a.cfg.Strategy.CarryBufferUSD
+	fundingRateOK := funding >= a.cfg.Strategy.MinFundingRate
+	netCarryOK := netCarryUSD >= carryBufferUSD
+	_, fundingOKConfirmed, fundingBadConfirmed := a.updateFundingRegime(funding, a.cfg.Strategy.MinFundingRate, netCarryUSD, carryBufferUSD)
 	state := a.strategy.State
 	logTick := func(decision string, extra ...zap.Field) {
 		if a.log == nil {
@@ -273,12 +330,35 @@ func (a *App) tick(ctx context.Context) error {
 			zap.Float64("perp_mid", perpMid),
 			zap.Float64("spot_exposure_usd", spotExposureUSD),
 			zap.Float64("perp_exposure_usd", perpExposureUSD),
+			zap.Float64("delta_usd", deltaUSD),
+			zap.Float64("delta_band_usd", a.cfg.Strategy.DeltaBandUSD),
 			zap.Float64("funding_rate", funding),
 			zap.Float64("expected_funding_usd", expectedFunding),
 			zap.Float64("min_expected_funding_usd", minExpectedFunding),
+			zap.Float64("estimated_cost_usd", estimatedCostUSD),
+			zap.Float64("net_expected_carry_usd", netCarryUSD),
+			zap.Float64("carry_buffer_usd", carryBufferUSD),
+			zap.Float64("fee_bps", a.cfg.Strategy.FeeBps),
+			zap.Float64("slippage_bps", a.cfg.Strategy.SlippageBps),
+			zap.Bool("funding_rate_ok", fundingRateOK),
+			zap.Bool("net_carry_ok", netCarryOK),
+			zap.Int("funding_ok_count", a.fundingOKCount),
+			zap.Int("funding_bad_count", a.fundingBadCount),
+			zap.Int("funding_confirmations", a.cfg.Strategy.FundingConfirmations),
+			zap.Int("funding_dip_confirmations", a.cfg.Strategy.FundingDipConfirmations),
 			zap.Float64("volatility", vol),
 			zap.Float64("max_volatility", a.cfg.Strategy.MaxVolatility),
 			zap.Float64("min_exposure_usd", a.cfg.Strategy.MinExposureUSD),
+			zap.Float64("margin_ratio", snap.MarginRatio),
+			zap.Float64("health_ratio", snap.HealthRatio),
+			zap.Bool("has_margin_ratio", snap.HasMarginRatio),
+			zap.Bool("has_health_ratio", snap.HasHealthRatio),
+			zap.Bool("has_funding_forecast", hasForecast),
+			zap.Float64("predicted_funding_rate", forecast.Rate),
+			zap.Time("next_funding_at", forecast.NextFunding),
+			zap.String("predicted_funding_source", forecast.Source),
+			zap.Duration("market_age", marketAge),
+			zap.Duration("account_age", accountAge),
 		}
 		fields = append(fields, extra...)
 		a.log.Debug("tick", fields...)
@@ -295,6 +375,10 @@ func (a *App) tick(ctx context.Context) error {
 		a.resetToIdle()
 		state = a.strategy.State
 	}
+	if err := a.checkConnectivity(ctx, accountSnap.OpenOrders, marketAge, accountAge); err != nil {
+		logTick("skip_connectivity", zap.Error(err))
+		return nil
+	}
 	if state == strategy.StateIdle {
 		if !flat || snap.OpenOrderCount > 0 {
 			logTick("skip_idle_not_ready")
@@ -309,22 +393,61 @@ func (a *App) tick(ctx context.Context) error {
 
 	switch state {
 	case strategy.StateIdle:
-		enterSignal := expectedFunding >= minExpectedFunding && vol <= a.cfg.Strategy.MaxVolatility
-		logTick("idle", zap.Bool("enter_signal", enterSignal))
+		enterSignal := fundingOKConfirmed && vol <= a.cfg.Strategy.MaxVolatility
+		logTick("idle", zap.Bool("enter_signal", enterSignal), zap.Bool("funding_confirmed", fundingOKConfirmed))
 		if enterSignal {
 			if a.log != nil {
-				a.log.Info("enter signal", zap.Float64("expected_funding_usd", expectedFunding), zap.Float64("min_expected_funding_usd", minExpectedFunding), zap.Float64("volatility", vol), zap.Float64("max_volatility", a.cfg.Strategy.MaxVolatility))
+				a.log.Info("enter signal",
+					zap.Float64("expected_funding_usd", expectedFunding),
+					zap.Float64("min_expected_funding_usd", minExpectedFunding),
+					zap.Float64("net_expected_carry_usd", netCarryUSD),
+					zap.Float64("carry_buffer_usd", carryBufferUSD),
+					zap.Float64("estimated_cost_usd", estimatedCostUSD),
+					zap.Float64("volatility", vol),
+					zap.Float64("max_volatility", a.cfg.Strategy.MaxVolatility),
+				)
 			}
 			return a.enterPosition(ctx, snap)
 		}
 	case strategy.StateHedgeOK:
-		exitSignal := a.cfg.Strategy.ExitOnFundingDip && expectedFunding < minExpectedFunding
-		logTick("hedge_ok", zap.Bool("exit_signal", exitSignal), zap.Bool("exit_on_funding_dip", a.cfg.Strategy.ExitOnFundingDip))
+		exitSignal := a.cfg.Strategy.ExitOnFundingDip && fundingBadConfirmed
+		exitGuarded := false
+		timeToFunding := time.Duration(0)
 		if exitSignal {
+			exitGuarded, timeToFunding = a.shouldDeferExitForFunding(time.Now().UTC(), forecast, hasForecast, funding)
+		}
+		decision := "hedge_ok"
+		if exitSignal {
+			if exitGuarded {
+				decision = "exit_guarded"
+			} else {
+				decision = "exit_signal"
+			}
+		}
+		logTick(decision,
+			zap.Bool("exit_signal", exitSignal),
+			zap.Bool("exit_on_funding_dip", a.cfg.Strategy.ExitOnFundingDip),
+			zap.Bool("funding_bad_confirmed", fundingBadConfirmed),
+			zap.Bool("exit_guarded", exitGuarded),
+			zap.Bool("exit_funding_guard_enabled", a.exitFundingGuardEnabled()),
+			zap.Duration("exit_funding_guard", a.cfg.Strategy.ExitFundingGuard),
+			zap.Duration("time_to_funding", timeToFunding),
+		)
+		if exitSignal && !exitGuarded {
 			if a.log != nil {
-				a.log.Info("exit signal", zap.Float64("expected_funding_usd", expectedFunding), zap.Float64("min_expected_funding_usd", minExpectedFunding))
+				a.log.Info("exit signal",
+					zap.Float64("expected_funding_usd", expectedFunding),
+					zap.Float64("min_expected_funding_usd", minExpectedFunding),
+					zap.Float64("net_expected_carry_usd", netCarryUSD),
+					zap.Float64("carry_buffer_usd", carryBufferUSD),
+					zap.Float64("estimated_cost_usd", estimatedCostUSD),
+				)
 			}
 			return a.exitPosition(ctx, snap)
+		}
+		if err := a.rebalanceDelta(ctx, snap); err != nil {
+			a.log.Warn("delta hedge failed", zap.Error(err))
+			logTick("hedge_failed", zap.Error(err))
 		}
 	default:
 		logTick("hold")
@@ -342,6 +465,9 @@ func (a *App) refreshSpotBalancesWS(ctx context.Context) {
 		a.logSpotRefreshError(err)
 		return
 	}
+	if a.spotRefreshWarned && a.log != nil {
+		a.log.Info("spot balance refresh recovered")
+	}
 	a.spotRefreshWarned = false
 }
 
@@ -356,6 +482,30 @@ func (a *App) logSpotRefreshError(err error) {
 	a.log.Warn("spot balance refresh failed", zap.Error(err))
 }
 
+func (a *App) startMetricsServer(ctx context.Context) {
+	if a.metricsServer == nil {
+		return
+	}
+	if a.log != nil {
+		a.log.Info("metrics server starting", zap.String("address", a.metricsAddr), zap.String("path", a.metricsPath))
+	}
+	go func() {
+		if err := a.metricsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			if a.log != nil {
+				a.log.Warn("metrics server failed", zap.Error(err))
+			}
+		}
+	}()
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if err := a.metricsServer.Shutdown(shutdownCtx); err != nil && a.log != nil {
+			a.log.Warn("metrics server shutdown failed", zap.Error(err))
+		}
+	}()
+}
+
 func (a *App) startSpotReconciler(ctx context.Context) {
 	if a.cfg == nil {
 		return
@@ -363,6 +513,9 @@ func (a *App) startSpotReconciler(ctx context.Context) {
 	interval := a.cfg.Strategy.SpotReconcileInterval
 	if interval <= 0 {
 		return
+	}
+	if a.log != nil {
+		a.log.Info("spot reconciler started", zap.Duration("interval", interval))
 	}
 	go func() {
 		ticker := time.NewTicker(interval)
@@ -379,7 +532,250 @@ func (a *App) startSpotReconciler(ctx context.Context) {
 	}()
 }
 
-func (a *App) enterPosition(ctx context.Context, snap strategy.MarketSnapshot) error {
+func (a *App) checkConnectivity(ctx context.Context, openOrders []map[string]any, marketAge, accountAge time.Duration) error {
+	if a.cfg == nil {
+		return nil
+	}
+	err := strategy.CheckConnectivity(a.cfg.Risk, marketAge, accountAge)
+	if err == nil {
+		if a.killSwitchActive {
+			a.killSwitchActive = false
+			if a.metrics != nil {
+				a.metrics.KillSwitchRestored.Inc()
+			}
+			if a.log != nil {
+				a.log.Info("connectivity restored", zap.Duration("market_age", marketAge), zap.Duration("account_age", accountAge))
+			}
+		}
+		return nil
+	}
+	if !a.killSwitchActive {
+		a.killSwitchActive = true
+		if a.metrics != nil {
+			a.metrics.KillSwitchEngaged.Inc()
+		}
+		if a.log != nil {
+			a.log.Warn("connectivity kill switch engaged", zap.Error(err), zap.Duration("market_age", marketAge), zap.Duration("account_age", accountAge))
+		}
+		if a.alerts != nil {
+			if alertErr := a.alerts.Send(ctx, fmt.Sprintf("Connectivity kill switch: %v", err)); alertErr != nil && a.log != nil {
+				a.log.Warn("alert send failed", zap.Error(alertErr))
+			}
+		}
+	}
+	if len(openOrders) > 0 {
+		a.cancelOpenOrders(ctx, openOrders)
+	}
+	return err
+}
+
+func (a *App) logFundingForecastError(err error) {
+	if a.log == nil {
+		return
+	}
+	if a.fundingForecastWarned {
+		return
+	}
+	a.fundingForecastWarned = true
+	a.log.Warn("predicted funding fetch failed", zap.Error(err))
+}
+
+func (a *App) refreshFundingForecast(ctx context.Context) {
+	if a.market == nil {
+		return
+	}
+	updated, err := a.market.RefreshFundingForecast(ctx)
+	if err != nil {
+		a.logFundingForecastError(err)
+		return
+	}
+	if updated {
+		if a.fundingForecastWarned && a.log != nil {
+			a.log.Info("predicted funding fetch recovered")
+		}
+		a.fundingForecastWarned = false
+	}
+}
+
+func (a *App) updateFundingRegime(funding, minRate, netCarryUSD, carryBufferUSD float64) (bool, bool, bool) {
+	if a.cfg == nil {
+		return false, false, false
+	}
+	ok := funding >= minRate && netCarryUSD >= carryBufferUSD
+	if ok {
+		a.fundingOKCount++
+		a.fundingBadCount = 0
+	} else {
+		a.fundingBadCount++
+		a.fundingOKCount = 0
+	}
+	okNeeded := a.cfg.Strategy.FundingConfirmations
+	if okNeeded < 1 {
+		okNeeded = 1
+	}
+	badNeeded := a.cfg.Strategy.FundingDipConfirmations
+	if badNeeded < 1 {
+		badNeeded = 1
+	}
+	return ok, a.fundingOKCount >= okNeeded, a.fundingBadCount >= badNeeded
+}
+
+func (a *App) shouldDeferExitForFunding(now time.Time, forecast market.FundingForecast, hasForecast bool, fundingRate float64) (bool, time.Duration) {
+	if a.cfg == nil {
+		return false, 0
+	}
+	if !a.exitFundingGuardEnabled() {
+		return false, 0
+	}
+	guard := a.cfg.Strategy.ExitFundingGuard
+	if guard <= 0 || !hasForecast || !forecast.HasNext || forecast.NextFunding.IsZero() {
+		return false, 0
+	}
+	until := forecast.NextFunding.Sub(now)
+	if until <= 0 {
+		return false, until
+	}
+	if forecast.HasRate {
+		if forecast.Rate <= 0 {
+			return false, until
+		}
+	} else if fundingRate <= 0 {
+		return false, until
+	}
+	if until > 0 && until <= guard {
+		return true, until
+	}
+	return false, until
+}
+
+func (a *App) exitFundingGuardEnabled() bool {
+	if a.cfg == nil {
+		return false
+	}
+	if a.cfg.Strategy.ExitFundingGuardEnabled == nil {
+		return true
+	}
+	return *a.cfg.Strategy.ExitFundingGuardEnabled
+}
+
+func (a *App) rebalanceDelta(ctx context.Context, snap strategy.MarketSnapshot) error {
+	if a.cfg == nil || a.executor == nil || a.market == nil {
+		return nil
+	}
+	band := a.cfg.Strategy.DeltaBandUSD
+	if band <= 0 {
+		return nil
+	}
+	if snap.OpenOrderCount > 0 {
+		return nil
+	}
+	priceRef := snap.OraclePrice
+	if priceRef == 0 {
+		priceRef = snap.PerpMidPrice
+	}
+	if priceRef == 0 {
+		priceRef = snap.SpotMidPrice
+	}
+	if priceRef == 0 {
+		return errors.New("delta hedge price reference missing")
+	}
+	deltaBase := snap.SpotBalance + snap.PerpPosition
+	deltaUSD := deltaBase * priceRef
+	if math.Abs(deltaUSD) <= band {
+		return nil
+	}
+	if math.Abs(deltaUSD) < a.cfg.Strategy.MinExposureUSD {
+		return nil
+	}
+	perpCtx, ok := a.market.PerpContext(snap.PerpAsset)
+	if !ok {
+		return fmt.Errorf("perp context not found for %s", snap.PerpAsset)
+	}
+	size := math.Abs(deltaBase)
+	if perpCtx.SzDecimals >= 0 {
+		size = roundDown(size, perpCtx.SzDecimals)
+	}
+	if size <= 0 {
+		return errors.New("delta hedge size rounded to zero")
+	}
+	limit := snap.PerpMidPrice
+	if limit == 0 {
+		limit = snap.SpotMidPrice
+	}
+	limit = normalizeLimitPrice(limit, false, perpCtx.SzDecimals)
+	if limit <= 0 {
+		return errors.New("delta hedge limit price invalid")
+	}
+	isBuy := deltaUSD < 0
+	reduceOnly := (isBuy && snap.PerpPosition < 0) || (!isBuy && snap.PerpPosition > 0)
+	order := exec.Order{
+		Asset:         perpCtx.Index,
+		IsBuy:         isBuy,
+		Size:          size,
+		LimitPrice:    limit,
+		ReduceOnly:    reduceOnly,
+		ClientOrderID: fmt.Sprintf("hedge-%s", time.Now().UTC().Format("20060102T150405Z")),
+		Tif:           string(exchange.TifIoc),
+	}
+	if _, err := a.executor.PlaceOrder(ctx, order); err != nil {
+		if a.metrics != nil {
+			a.metrics.OrdersFailed.Inc()
+		}
+		return err
+	}
+	if a.metrics != nil {
+		a.metrics.OrdersPlaced.Inc()
+	}
+	if a.log != nil {
+		a.log.Info("delta hedge order placed",
+			zap.String("perp_asset", snap.PerpAsset),
+			zap.Float64("delta_usd", deltaUSD),
+			zap.Float64("band_usd", band),
+			zap.Float64("size", size),
+			zap.Bool("is_buy", isBuy),
+			zap.Bool("reduce_only", reduceOnly),
+		)
+	}
+	return nil
+}
+
+func (a *App) enterPosition(ctx context.Context, snap strategy.MarketSnapshot) (err error) {
+	start := time.Now().UTC()
+	clientID := ""
+	spotLimit := 0.0
+	perpLimit := 0.0
+	spotSize := 0.0
+	perpSize := 0.0
+	spotFilled := 0.0
+	perpFilled := 0.0
+	defer func() {
+		if err == nil {
+			return
+		}
+		if a.metrics != nil {
+			a.metrics.EntryFailed.Inc()
+		}
+		if a.log != nil {
+			a.log.Warn("enter failed",
+				zap.Error(err),
+				zap.String("perp_asset", snap.PerpAsset),
+				zap.String("spot_asset", snap.SpotAsset),
+				zap.String("client_id", clientID),
+				zap.Duration("duration", time.Since(start)),
+				zap.Float64("spot_limit", spotLimit),
+				zap.Float64("perp_limit", perpLimit),
+				zap.Float64("spot_size", spotSize),
+				zap.Float64("perp_size", perpSize),
+				zap.Float64("spot_filled", spotFilled),
+				zap.Float64("perp_filled", perpFilled),
+			)
+		}
+		if a.alerts != nil {
+			if alertErr := a.alerts.Send(ctx, fmt.Sprintf("Entry failed for %s/%s: %v", snap.PerpAsset, snap.SpotAsset, err)); alertErr != nil && a.log != nil {
+				a.log.Warn("alert send failed", zap.Error(alertErr))
+			}
+		}
+	}()
 	a.strategy.Apply(strategy.EventEnter)
 	a.persistStrategySnapshot(ctx, snap)
 	priceRef := snap.SpotMidPrice
@@ -392,7 +788,8 @@ func (a *App) enterPosition(ctx context.Context, snap strategy.MarketSnapshot) e
 	size := snap.NotionalUSD / priceRef
 	perpCtx, ok := a.market.PerpContext(snap.PerpAsset)
 	if !ok {
-		return fmt.Errorf("perp context not found for %s", snap.PerpAsset)
+		err = fmt.Errorf("perp context not found for %s", snap.PerpAsset)
+		return err
 	}
 	perpID := perpCtx.Index
 	spotCtx, err := a.spotContext(snap.SpotAsset)
@@ -401,29 +798,31 @@ func (a *App) enterPosition(ctx context.Context, snap strategy.MarketSnapshot) e
 	}
 	spotID, ok := a.market.SpotAssetID(spotCtx.Symbol)
 	if !ok {
-		return fmt.Errorf("spot asset id not found for %s", snap.SpotAsset)
+		err = fmt.Errorf("spot asset id not found for %s", snap.SpotAsset)
+		return err
 	}
-	spotLimit := snap.SpotMidPrice
+	spotLimit = snap.SpotMidPrice
 	if spotLimit == 0 {
 		spotLimit = snap.PerpMidPrice
 	}
-	perpLimit := snap.PerpMidPrice
+	perpLimit = snap.PerpMidPrice
 	if perpLimit == 0 {
 		perpLimit = snap.SpotMidPrice
 	}
 	spotLimit = normalizeLimitPrice(spotLimit, true, spotCtx.BaseSzDecimals)
 	perpLimit = normalizeLimitPrice(perpLimit, false, perpCtx.SzDecimals)
-	spotSize := size
+	spotSize = size
 	if spotCtx.BaseSzDecimals >= 0 {
 		spotSize = roundDown(spotSize, spotCtx.BaseSzDecimals)
 	}
 	if spotSize <= 0 || spotLimit <= 0 || perpLimit <= 0 {
-		return errors.New("derived order size or limit price is invalid")
+		err = errors.New("derived order size or limit price is invalid")
+		return err
 	}
 	if err := a.ensureSpotUSDC(ctx, snap.NotionalUSD); err != nil {
 		return err
 	}
-	clientID := fmt.Sprintf("enter-%s", time.Now().UTC().Format("20060102T150405Z"))
+	clientID = fmt.Sprintf("enter-%s", time.Now().UTC().Format("20060102T150405Z"))
 	spotOrder := exec.Order{
 		Asset:         spotID,
 		IsBuy:         true,
@@ -444,10 +843,11 @@ func (a *App) enterPosition(ctx context.Context, snap strategy.MarketSnapshot) e
 	}
 	if spotFilled <= 0 {
 		a.resetToIdle()
-		return errors.New("spot entry did not fill")
+		err = errors.New("spot entry did not fill")
+		return err
 	}
 
-	perpSize := spotFilled
+	perpSize = spotFilled
 	if perpCtx.SzDecimals >= 0 {
 		perpSize = roundDown(perpSize, perpCtx.SzDecimals)
 	}
@@ -456,7 +856,8 @@ func (a *App) enterPosition(ctx context.Context, snap strategy.MarketSnapshot) e
 			a.log.Warn("spot rollback failed", zap.Error(rollbackErr))
 		}
 		a.resetToIdle()
-		return errors.New("perp entry size rounded to zero")
+		err = errors.New("perp entry size rounded to zero")
+		return err
 	}
 	perpOrder := exec.Order{
 		Asset:         perpID,
@@ -484,7 +885,8 @@ func (a *App) enterPosition(ctx context.Context, snap strategy.MarketSnapshot) e
 			a.log.Warn("spot rollback failed", zap.Error(rollbackErr))
 		}
 		a.resetToIdle()
-		return errors.New("perp entry did not fill")
+		err = errors.New("perp entry did not fill")
+		return err
 	}
 	if residual := spotFilled - perpFilled; residual > 0 {
 		if rollbackErr := a.rollbackSpot(ctx, spotID, residual, spotLimit); rollbackErr != nil {
@@ -493,19 +895,67 @@ func (a *App) enterPosition(ctx context.Context, snap strategy.MarketSnapshot) e
 	}
 	a.strategy.Apply(strategy.EventHedgeOK)
 	a.persistStrategySnapshot(ctx, snap)
-	a.log.Info("entered delta-neutral position", zap.String("perp_asset", snap.PerpAsset), zap.String("spot_asset", snap.SpotAsset), zap.Float64("size", perpFilled))
+	a.log.Info("entered delta-neutral position",
+		zap.String("perp_asset", snap.PerpAsset),
+		zap.String("spot_asset", snap.SpotAsset),
+		zap.String("client_id", clientID),
+		zap.Float64("spot_limit", spotLimit),
+		zap.Float64("perp_limit", perpLimit),
+		zap.Float64("spot_size", spotSize),
+		zap.Float64("perp_size", perpSize),
+		zap.Float64("spot_filled", spotFilled),
+		zap.Float64("perp_filled", perpFilled),
+		zap.Duration("duration", time.Since(start)),
+	)
 	if err := a.alerts.Send(ctx, fmt.Sprintf("Entered delta-neutral %s/%s size %.6f", snap.PerpAsset, snap.SpotAsset, perpFilled)); err != nil {
 		a.log.Warn("alert send failed", zap.Error(err))
 	}
 	return nil
 }
 
-func (a *App) exitPosition(ctx context.Context, snap strategy.MarketSnapshot) error {
+func (a *App) exitPosition(ctx context.Context, snap strategy.MarketSnapshot) (err error) {
+	start := time.Now().UTC()
+	clientID := ""
+	spotLimit := 0.0
+	perpLimit := 0.0
+	spotSize := 0.0
+	perpSize := 0.0
+	spotFilled := 0.0
+	perpFilled := 0.0
+	defer func() {
+		if err == nil {
+			return
+		}
+		if a.metrics != nil {
+			a.metrics.ExitFailed.Inc()
+		}
+		if a.log != nil {
+			a.log.Warn("exit failed",
+				zap.Error(err),
+				zap.String("perp_asset", snap.PerpAsset),
+				zap.String("spot_asset", snap.SpotAsset),
+				zap.String("client_id", clientID),
+				zap.Duration("duration", time.Since(start)),
+				zap.Float64("spot_limit", spotLimit),
+				zap.Float64("perp_limit", perpLimit),
+				zap.Float64("spot_size", spotSize),
+				zap.Float64("perp_size", perpSize),
+				zap.Float64("spot_filled", spotFilled),
+				zap.Float64("perp_filled", perpFilled),
+			)
+		}
+		if a.alerts != nil {
+			if alertErr := a.alerts.Send(ctx, fmt.Sprintf("Exit failed for %s/%s: %v", snap.PerpAsset, snap.SpotAsset, err)); alertErr != nil && a.log != nil {
+				a.log.Warn("alert send failed", zap.Error(alertErr))
+			}
+		}
+	}()
 	a.strategy.Apply(strategy.EventExit)
 	a.persistStrategySnapshot(ctx, snap)
 	perpCtx, ok := a.market.PerpContext(snap.PerpAsset)
 	if !ok {
-		return fmt.Errorf("perp context not found for %s", snap.PerpAsset)
+		err = fmt.Errorf("perp context not found for %s", snap.PerpAsset)
+		return err
 	}
 	perpID := perpCtx.Index
 	spotCtx, err := a.spotContext(snap.SpotAsset)
@@ -514,31 +964,33 @@ func (a *App) exitPosition(ctx context.Context, snap strategy.MarketSnapshot) er
 	}
 	spotID, ok := a.market.SpotAssetID(spotCtx.Symbol)
 	if !ok {
-		return fmt.Errorf("spot asset id not found for %s", snap.SpotAsset)
+		err = fmt.Errorf("spot asset id not found for %s", snap.SpotAsset)
+		return err
 	}
-	spotLimit := snap.SpotMidPrice
+	spotLimit = snap.SpotMidPrice
 	if spotLimit == 0 {
 		spotLimit = snap.PerpMidPrice
 	}
-	perpLimit := snap.PerpMidPrice
+	perpLimit = snap.PerpMidPrice
 	if perpLimit == 0 {
 		perpLimit = snap.SpotMidPrice
 	}
 	spotLimit = normalizeLimitPrice(spotLimit, true, spotCtx.BaseSzDecimals)
 	perpLimit = normalizeLimitPrice(perpLimit, false, perpCtx.SzDecimals)
 	if spotLimit <= 0 || perpLimit <= 0 {
-		return errors.New("derived order size or limit price is invalid")
+		err = errors.New("derived order size or limit price is invalid")
+		return err
 	}
 	spotBalance := snap.SpotBalance
 	perpPosition := snap.PerpPosition
-	spotSize := math.Abs(spotBalance)
+	spotSize = math.Abs(spotBalance)
 	if spotCtx.BaseSzDecimals >= 0 {
 		spotSize = roundDown(spotSize, spotCtx.BaseSzDecimals)
 	}
 	if a.exposureBelowThreshold(spotSize, spotLimit) {
 		spotSize = 0
 	}
-	perpSize := math.Abs(perpPosition)
+	perpSize = math.Abs(perpPosition)
 	if perpCtx.SzDecimals >= 0 {
 		perpSize = roundDown(perpSize, perpCtx.SzDecimals)
 	}
@@ -549,8 +1001,7 @@ func (a *App) exitPosition(ctx context.Context, snap strategy.MarketSnapshot) er
 		a.strategy.Apply(strategy.EventDone)
 		return nil
 	}
-	clientID := fmt.Sprintf("exit-%s", time.Now().UTC().Format("20060102T150405Z"))
-	spotFilled := 0.0
+	clientID = fmt.Sprintf("exit-%s", time.Now().UTC().Format("20060102T150405Z"))
 	if spotSize > 0 {
 		spotOrder := exec.Order{
 			Asset:         spotID,
@@ -574,7 +1025,8 @@ func (a *App) exitPosition(ctx context.Context, snap strategy.MarketSnapshot) er
 				}
 			}
 			a.strategy.Apply(strategy.EventHedgeOK)
-			return errors.New("spot exit did not fully fill")
+			err = errors.New("spot exit did not fully fill")
+			return err
 		}
 	}
 	if perpSize > 0 {
@@ -606,12 +1058,24 @@ func (a *App) exitPosition(ctx context.Context, snap strategy.MarketSnapshot) er
 				}
 			}
 			a.strategy.Apply(strategy.EventHedgeOK)
-			return errors.New("perp exit did not fully fill")
+			err = errors.New("perp exit did not fully fill")
+			return err
 		}
 	}
 	a.strategy.Apply(strategy.EventDone)
 	a.persistStrategySnapshot(ctx, snap)
-	a.log.Info("exited delta-neutral position", zap.String("perp_asset", snap.PerpAsset), zap.String("spot_asset", snap.SpotAsset), zap.Float64("spot_size", spotSize), zap.Float64("perp_size", perpSize))
+	a.log.Info("exited delta-neutral position",
+		zap.String("perp_asset", snap.PerpAsset),
+		zap.String("spot_asset", snap.SpotAsset),
+		zap.String("client_id", clientID),
+		zap.Float64("spot_limit", spotLimit),
+		zap.Float64("perp_limit", perpLimit),
+		zap.Float64("spot_size", spotSize),
+		zap.Float64("perp_size", perpSize),
+		zap.Float64("spot_filled", spotFilled),
+		zap.Float64("perp_filled", perpFilled),
+		zap.Duration("duration", time.Since(start)),
+	)
 	if err := a.alerts.Send(ctx, fmt.Sprintf("Exited delta-neutral %s/%s", snap.PerpAsset, snap.SpotAsset)); err != nil {
 		a.log.Warn("alert send failed", zap.Error(err))
 	}
@@ -785,10 +1249,6 @@ func (a *App) rollbackSpot(ctx context.Context, assetID int, size, limit float64
 	return a.rollbackSpotWith(ctx, assetID, size, limit, false)
 }
 
-func (a *App) rollbackSpotBuy(ctx context.Context, assetID int, size, limit float64) error {
-	return a.rollbackSpotWith(ctx, assetID, size, limit, true)
-}
-
 func (a *App) rollbackSpotWith(ctx context.Context, assetID int, size, limit float64, isBuy bool) error {
 	if size <= 0 {
 		return nil
@@ -831,6 +1291,9 @@ func (a *App) persistStrategySnapshot(ctx context.Context, snap strategy.MarketS
 	if err := persist.SaveStrategySnapshot(ctx, a.store, snapshot); err != nil {
 		a.logSnapshotPersistError(err)
 		return
+	}
+	if a.snapshotPersistWarned && a.log != nil {
+		a.log.Info("strategy snapshot persistence recovered")
 	}
 	a.snapshotPersistWarned = false
 }

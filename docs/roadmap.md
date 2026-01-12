@@ -22,6 +22,7 @@ REST (POST https://api.hyperliquid.xyz/info):
 - Spot balances: `spotClearinghouseState` with user address
 - Open orders: `openOrders`
 - User fills: `userFillsByTime` (fallback)
+- User funding: `userFunding` (funding payment history; schema validation in progress)
 - Perp positions/margin: `clearinghouseState`
 
 REST (POST https://api.hyperliquid.xyz/exchange):
@@ -64,10 +65,10 @@ ENTER flow:
 - If either leg fails to fill quickly: cancel outstanding orders, revert to flat, return to IDLE.
 
 HEDGE_OK flow:
-- Current: hold position and exit on funding deterioration (no delta-band re-hedging yet).
-- Phase 4: enforce delta neutral band, rebalance with small perp adjustments.
-- Phase 4: enforce margin buffer, reduce or exit if health degrades.
-- Phase 4: exit on expected carry < fees + buffer.
+- Enforce delta neutral band, rebalance with small perp IOC adjustments.
+- Enforce margin/health thresholds to gate actions when buffers are thin.
+- Connectivity kill switch: cancel open orders and pause trading when market/account data is stale.
+- Exit when net expected carry (after fees/slippage + buffer) stays below threshold for N ticks.
 
 EXIT flow:
 - Size from actual spot/perp exposure (not notional); skip legs below `strategy.min_exposure_usd` to avoid dust/tiny orders.
@@ -109,9 +110,9 @@ If exposure exists and funding is bad: exit.
 - [x] Funds placement matters: spot orders require spot wallet funds (`spotClearinghouseState`); perp wallet funds appear under `clearinghouseState`.
 - [x] Partial fills: reconcile fills via WS events or user fills; hedge only the executed size; consider IOC for spot to avoid lingering partials.
 - [x] Exchange nonces persist in SQLite to avoid reuse on restart.
-- [ ] Funding timing: confirm hourly funding schedule and next funding timestamp; avoid closing right before a positive funding event unless risk dictates.
-- [ ] Funding data sources: verify availability and schema for `predictedFundings` and `userFunding` before relying on them.
-- [ ] Fees and slippage: compute expected carry net of fees/spread before entry; avoid churn when funding is low.
+- [x] Funding timing: predictedFundings live verified (HlPerp hourly + nextFundingTime ms); exit-timing guard around nextFundingTime implemented.
+- [ ] Funding data sources: predictedFundings verified and parsed; `userFunding` docs show delta-based event shape (coin/usdc/fundingRate + time ms) and parser updated; live verification deferred until production runtime when the bot holds a perp position across a funding event.
+- [x] Fees and slippage: compute expected carry net of fees/spread before entry; avoid churn when funding is low (uses configured bps).
 - [ ] Margin and collateral: verify how spot value contributes to perp margin on-chain; maintain buffers and avoid full-capital spot buys.
 - [ ] WS semantics: handle `isSnapshot: true` correctly to avoid double-counting; resubscribe on reconnect.
 
@@ -132,11 +133,15 @@ If exposure exists and funding is bad: exit.
 - [x] Phase 3: Add ENTER/EXIT timeouts, cancel-on-timeout, and rollback on partial fills.
 - [x] Phase 3: Enforce reduce-only on exit.
 - [x] Phase 3: Add dust threshold (`strategy.min_exposure_usd`) to avoid tiny exit orders.
-- [ ] Phase 4: Delta band checks, margin buffer thresholds, connectivity kill switch.
-- [ ] Phase 4: Funding regime rules and expected carry estimation.
-- [ ] Phase 5: Expand structured logging fields.
-- [ ] Phase 5: Add metrics counters and alert routing.
+- [x] Phase 4: Delta band checks, margin buffer thresholds, connectivity kill switch.
+- [x] Phase 4: Funding regime rules and expected carry estimation.
+- [x] Phase 5: Expand structured logging fields.
+- [x] Phase 5: Add metrics counters and alert routing.
+- [x] Phase 5: Implement Telegram alert transport (Bot API sendMessage, gated by `telegram.enabled`).
 - [ ] Phase 6: Harden systemd unit and config management.
+- [ ] Phase 6: Telegram operator controls (status, pause/resume, safe runtime risk overrides with atomic apply + audit).
+- [ ] Phase 6: Persist OHLC + position snapshots to TimescaleDB and build Grafana candlestick dashboards (ECharts/Plotly).
+- [ ] Phase 6: Auto-derive config defaults (min_exposure_usd from exchange constraints, delta_band_usd from notional, risk max ages from intervals).
 - [ ] Phase 6: Add dry-run and paper trading modes.
 
 ## Suggested Initial Parameters (Small-Cap Trial)

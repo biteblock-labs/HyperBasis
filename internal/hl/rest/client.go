@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -34,48 +33,12 @@ type InfoRequest struct {
 	User string `json:"user,omitempty"`
 }
 
-type ExchangeRequest struct {
-	Type  string      `json:"type"`
-	Order interface{} `json:"order,omitempty"`
-	Oid   string      `json:"oid,omitempty"`
-}
-
-type Order struct {
-	Asset         int     `json:"asset"`
-	IsBuy         bool    `json:"isBuy"`
-	Size          float64 `json:"sz"`
-	LimitPrice    float64 `json:"limitPx,omitempty"`
-	ReduceOnly    bool    `json:"reduceOnly,omitempty"`
-	ClientOrderID string  `json:"cloid,omitempty"`
-}
-
 func (c *Client) Info(ctx context.Context, req interface{}) (map[string]any, error) {
 	return c.post(ctx, "/info", req)
 }
 
 func (c *Client) InfoAny(ctx context.Context, req interface{}) (any, error) {
 	return c.postAny(ctx, "/info", req)
-}
-
-func (c *Client) Exchange(ctx context.Context, req interface{}) (map[string]any, error) {
-	return c.post(ctx, "/exchange", req)
-}
-
-func (c *Client) PlaceOrder(ctx context.Context, order Order) (string, error) {
-	resp, err := c.Exchange(ctx, ExchangeRequest{Type: "order", Order: order})
-	if err != nil {
-		return "", err
-	}
-	orderID := parseOrderID(resp)
-	if orderID == "" {
-		return "", errors.New("missing order id in exchange response")
-	}
-	return orderID, nil
-}
-
-func (c *Client) CancelOrder(ctx context.Context, orderID string) error {
-	_, err := c.Exchange(ctx, ExchangeRequest{Type: "cancel", Oid: orderID})
-	return err
 }
 
 func (c *Client) post(ctx context.Context, path string, req interface{}) (map[string]any, error) {
@@ -130,18 +93,4 @@ func (c *Client) postAny(ctx context.Context, path string, req interface{}) (any
 		return nil, err
 	}
 	return data, nil
-}
-
-func parseOrderID(resp map[string]any) string {
-	for _, key := range []string{"orderId", "orderID", "oid", "id"} {
-		if v, ok := resp[key]; ok {
-			switch val := v.(type) {
-			case string:
-				return val
-			case float64:
-				return fmt.Sprintf("%.0f", val)
-			}
-		}
-	}
-	return ""
 }

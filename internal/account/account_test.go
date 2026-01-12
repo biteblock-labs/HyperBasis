@@ -190,6 +190,45 @@ func TestClearinghouseSnapshotAndDelta(t *testing.T) {
 	}
 }
 
+func TestClearinghouseMarginSummary(t *testing.T) {
+	acct := &Account{log: zap.NewNop()}
+	snapshot := map[string]any{
+		"channel": "clearinghouseState",
+		"data": map[string]any{
+			"isSnapshot": true,
+			"marginSummary": map[string]any{
+				"accountValue":      "1000",
+				"maintenanceMargin": "250",
+				"marginRatio":       "0.8",
+			},
+		},
+	}
+	raw, _ := json.Marshal(snapshot)
+	acct.handleMessage(raw)
+	state := acct.Snapshot()
+	if !state.HasMarginSummary {
+		t.Fatalf("expected margin summary present")
+	}
+	if math.Abs(state.MarginSummary.AccountValue-1000) > 1e-9 {
+		t.Fatalf("expected account value 1000, got %f", state.MarginSummary.AccountValue)
+	}
+	if math.Abs(state.MarginSummary.MaintenanceMargin-250) > 1e-9 {
+		t.Fatalf("expected maintenance margin 250, got %f", state.MarginSummary.MaintenanceMargin)
+	}
+	if !state.MarginSummary.HasMarginRatio {
+		t.Fatalf("expected margin ratio present")
+	}
+	if math.Abs(state.MarginSummary.MarginRatio-0.8) > 1e-9 {
+		t.Fatalf("expected margin ratio 0.8, got %f", state.MarginSummary.MarginRatio)
+	}
+	if !state.MarginSummary.HasHealthRatio {
+		t.Fatalf("expected derived health ratio")
+	}
+	if math.Abs(state.MarginSummary.HealthRatio-4) > 1e-9 {
+		t.Fatalf("expected health ratio 4, got %f", state.MarginSummary.HealthRatio)
+	}
+}
+
 func contains(items []string, target string) bool {
 	for _, item := range items {
 		if item == target {

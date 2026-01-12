@@ -30,4 +30,8 @@ type MarketSnapshot struct {
 	SpotBalance    float64
 	PerpPosition   float64
 	OpenOrderCount int
+	MarginRatio    float64
+	HealthRatio    float64
+	HasMarginRatio bool
+	HasHealthRatio bool
 }

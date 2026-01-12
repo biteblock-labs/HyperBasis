@@ -1,9 +1,9 @@
 # Repository Architecture
 
 ## High-Level Flow
-1. `cmd/bot/main.go` loads config, builds logger, wires the app, and starts a graceful shutdown context.
+1. `cmd/bot/main.go` loads `.env` (if present), loads config, builds logger, wires the app, and starts a graceful shutdown context.
 2. `internal/app` reconciles account state, starts market data feeds, and runs the strategy tick loop.
-3. Each tick reads market data, runs risk checks, advances the state machine, and executes orders.
+3. Each tick reads market data, runs risk + connectivity checks, advances the state machine, and executes orders.
 
 ## Package Map
 - `cmd/bot`: entrypoint and process lifecycle.
@@ -19,8 +19,8 @@
 - `internal/exec`: order placement/cancel, idempotency, retries with backoff.
 - `internal/strategy`: state machine, types, and risk checks.
 - `internal/state`: persistent store interface; SQLite implementation.
-- `internal/metrics`: counters (currently no-op).
-- `internal/alerts`: optional Telegram alerts (stubbed).
+- `internal/metrics`: counters with optional Prometheus export.
+- `internal/alerts`: Telegram Bot API alerts.
 - `scripts/systemd`: deployment unit.
 
 ## Data and Control Flow
@@ -31,7 +31,8 @@
   - Start periodic spot balance reconcile via WS post `spotClearinghouseState`.
 - Runtime:
   - Strategy tick reads mid price, funding, volatility.
-  - Risk checks gate entry/exit and position changes.
+  - Risk checks gate entry/exit and position changes (delta-band re-hedging, margin/health thresholds).
+  - Connectivity kill switch pauses trading and cancels open orders when data is stale.
   - State machine drives entry, steady state, and exit flows.
   - Executor places/cancels orders with idempotent client order IDs.
   - Account WS applies `userNonFundingLedgerUpdates` spot balance deltas between reconciles.
@@ -84,10 +85,13 @@ sequenceDiagram
 
 ## Configuration
 - `internal/config/config.yaml` includes endpoints, timeouts, strategy thresholds, and risk limits.
+- `cmd/bot` loads `.env` when present; `HL_TELEGRAM_TOKEN`/`HL_TELEGRAM_CHAT_ID` override config values, but `telegram.enabled` remains config-driven.
 - Config defaults are applied in `internal/config/config.go`.
 - `strategy.min_exposure_usd` treats small residual exposure as dust to avoid tiny exit orders.
+- `strategy.delta_band_usd` defines the steady-state delta drift band for re-hedging.
 - `strategy.spot_reconcile_interval` controls periodic spot balance refreshes via WS post.
 - `ws.ping_interval` keeps WebSocket connections alive to avoid idle disconnects.
+- `risk.max_market_age` and `risk.max_account_age` drive the connectivity kill switch thresholds.
 
 ## Dependencies
 - Logging: `go.uber.org/zap`

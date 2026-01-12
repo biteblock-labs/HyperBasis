@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"hl-carry-bot/internal/hl/rest"
 	"hl-carry-bot/internal/hl/ws"
@@ -38,6 +39,7 @@ type Account struct {
 	hasSpotStateSnapshot   bool
 	lastClearinghouseState map[string]any
 	spotPostID             atomic.Uint64
+	lastUpdate             time.Time
 }
 
 const (
@@ -47,10 +49,22 @@ const (
 )
 
 type State struct {
-	SpotBalances  map[string]float64
-	PerpPosition  map[string]float64
-	OpenOrders    []map[string]any
-	LastRawUpdate map[string]any
+	SpotBalances     map[string]float64
+	PerpPosition     map[string]float64
+	OpenOrders       []map[string]any
+	LastRawUpdate    map[string]any
+	MarginSummary    MarginSummary
+	HasMarginSummary bool
+}
+
+type MarginSummary struct {
+	AccountValue      float64
+	TotalMarginUsed   float64
+	MaintenanceMargin float64
+	MarginRatio       float64
+	HealthRatio       float64
+	HasMarginRatio    bool
+	HasHealthRatio    bool
 }
 
 func New(restClient *rest.Client, wsClient *ws.Client, log *zap.Logger, user string) *Account {
@@ -73,11 +87,14 @@ func (a *Account) Reconcile(ctx context.Context) (*State, error) {
 	if err != nil {
 		return nil, err
 	}
+	marginSummary, hasMargin := parseMarginSummary(perp)
 	state := State{
-		SpotBalances:  parseBalances(spot),
-		PerpPosition:  parsePositions(perp),
-		OpenOrders:    parseOpenOrders(orders),
-		LastRawUpdate: map[string]any{"spot": spot, "perp": perp, "orders": orders},
+		SpotBalances:     parseBalances(spot),
+		PerpPosition:     parsePositions(perp),
+		OpenOrders:       parseOpenOrders(orders),
+		LastRawUpdate:    map[string]any{"spot": spot, "perp": perp, "orders": orders},
+		MarginSummary:    marginSummary,
+		HasMarginSummary: hasMargin,
 	}
 	a.mu.Lock()
 	a.state = state
@@ -86,6 +103,7 @@ func (a *Account) Reconcile(ctx context.Context) (*State, error) {
 	a.hasPerpStateSnapshot = true
 	a.hasSpotStateSnapshot = true
 	a.lastClearinghouseState = perp
+	a.lastUpdate = time.Now().UTC()
 	a.mu.Unlock()
 	return &state, nil
 }
@@ -161,6 +179,12 @@ func (a *Account) FillsEnabled() bool {
 	return a.fillsEnabled
 }
 
+func (a *Account) LastUpdate() time.Time {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.lastUpdate
+}
+
 func (a *Account) FillSize(orderID string) float64 {
 	if orderID == "" {
 		return 0
@@ -199,6 +223,7 @@ func (a *Account) applyOpenOrdersUpdate(data any) {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.lastUpdate = time.Now().UTC()
 	if isSnapshot || !a.hasOpenOrdersSnapshot {
 		a.openOrders = openOrdersMap(orders)
 		a.state.OpenOrders = openOrdersSlice(a.openOrders)
@@ -238,11 +263,13 @@ func (a *Account) applyClearinghouseUpdate(data any) {
 			positions = parsePositions(nested)
 		}
 	}
-	if len(positions) == 0 && !hasSnapshot {
+	marginSummary, hasMargin := parseMarginSummary(payload)
+	if len(positions) == 0 && !hasSnapshot && !hasMargin {
 		return
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.lastUpdate = time.Now().UTC()
 	if isSnapshot || !a.hasPerpStateSnapshot {
 		a.state.PerpPosition = positions
 		a.hasPerpStateSnapshot = true
@@ -263,6 +290,10 @@ func (a *Account) applyClearinghouseUpdate(data any) {
 		a.state.LastRawUpdate = make(map[string]any)
 	}
 	a.state.LastRawUpdate["ws_clearinghouse"] = data
+	if hasMargin {
+		a.state.MarginSummary = marginSummary
+		a.state.HasMarginSummary = true
+	}
 }
 
 func (a *Account) applyUserFillsUpdate(data any) {
@@ -272,6 +303,7 @@ func (a *Account) applyUserFillsUpdate(data any) {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.lastUpdate = time.Now().UTC()
 	if a.fillsByOrderID == nil {
 		a.fillsByOrderID = make(map[string]float64)
 	}
@@ -395,6 +427,73 @@ func parseSpotBalances(data any) map[string]float64 {
 		return parseBalanceEntries(payload)
 	}
 	return nil
+}
+
+func parseMarginSummary(data any) (MarginSummary, bool) {
+	if data == nil {
+		return MarginSummary{}, false
+	}
+	payload, ok := data.(map[string]any)
+	if !ok {
+		return MarginSummary{}, false
+	}
+	if summary, ok := payload["marginSummary"].(map[string]any); ok {
+		return parseMarginSummaryMap(summary)
+	}
+	if summary, ok := payload["crossMarginSummary"].(map[string]any); ok {
+		return parseMarginSummaryMap(summary)
+	}
+	if nested, ok := payload["data"]; ok {
+		if summary, ok := parseMarginSummary(nested); ok {
+			return summary, ok
+		}
+	}
+	return MarginSummary{}, false
+}
+
+func parseMarginSummaryMap(summary map[string]any) (MarginSummary, bool) {
+	var out MarginSummary
+	var (
+		found           bool
+		hasAccountValue bool
+		hasMarginUsed   bool
+		hasMaintenance  bool
+		hasMarginRatio  bool
+		hasHealthRatio  bool
+	)
+	setFloat := func(dst *float64, has *bool, key string) {
+		if *has {
+			return
+		}
+		if val, ok := floatFromAny(summary[key]); ok {
+			*dst = val
+			*has = true
+			found = true
+		}
+	}
+	for _, key := range []string{"accountValue", "accountValueUsd", "accountValueUSDC"} {
+		setFloat(&out.AccountValue, &hasAccountValue, key)
+	}
+	for _, key := range []string{"totalMarginUsed", "totalMarginUsedUsd", "marginUsed"} {
+		setFloat(&out.TotalMarginUsed, &hasMarginUsed, key)
+	}
+	for _, key := range []string{"maintenanceMargin", "maintenanceMarginUsed", "maintMargin"} {
+		setFloat(&out.MaintenanceMargin, &hasMaintenance, key)
+	}
+	for _, key := range []string{"marginRatio", "margin_ratio", "marginFraction"} {
+		setFloat(&out.MarginRatio, &hasMarginRatio, key)
+	}
+	for _, key := range []string{"health", "accountHealth"} {
+		setFloat(&out.HealthRatio, &hasHealthRatio, key)
+	}
+	if !hasHealthRatio && hasAccountValue && hasMaintenance && out.MaintenanceMargin > 0 {
+		out.HealthRatio = out.AccountValue / out.MaintenanceMargin
+		hasHealthRatio = true
+		found = true
+	}
+	out.HasMarginRatio = hasMarginRatio
+	out.HasHealthRatio = hasHealthRatio
+	return out, found
 }
 
 func parseLedgerUpdates(data any) []map[string]any {
@@ -538,6 +637,7 @@ func (a *Account) applyLedgerUpdates(data any) {
 	}
 	if ledgerSnapshot(data) {
 		a.mu.Lock()
+		a.lastUpdate = time.Now().UTC()
 		if a.state.LastRawUpdate == nil {
 			a.state.LastRawUpdate = make(map[string]any)
 		}
@@ -547,6 +647,7 @@ func (a *Account) applyLedgerUpdates(data any) {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.lastUpdate = time.Now().UTC()
 	if !a.hasSpotStateSnapshot {
 		return
 	}
@@ -601,6 +702,7 @@ func (a *Account) RefreshSpotBalancesWS(ctx context.Context) error {
 	a.mu.Lock()
 	a.state.SpotBalances = balances
 	a.hasSpotStateSnapshot = true
+	a.lastUpdate = time.Now().UTC()
 	if a.state.LastRawUpdate == nil {
 		a.state.LastRawUpdate = make(map[string]any)
 	}
@@ -951,9 +1053,11 @@ func orderIsTerminal(order map[string]any) bool {
 
 func copyState(state State) State {
 	out := State{
-		SpotBalances: copyFloatMap(state.SpotBalances),
-		PerpPosition: copyFloatMap(state.PerpPosition),
-		OpenOrders:   copyOrderSlice(state.OpenOrders),
+		SpotBalances:     copyFloatMap(state.SpotBalances),
+		PerpPosition:     copyFloatMap(state.PerpPosition),
+		OpenOrders:       copyOrderSlice(state.OpenOrders),
+		MarginSummary:    state.MarginSummary,
+		HasMarginSummary: state.HasMarginSummary,
 	}
 	if state.LastRawUpdate != nil {
 		out.LastRawUpdate = make(map[string]any, len(state.LastRawUpdate))

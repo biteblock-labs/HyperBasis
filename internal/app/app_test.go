@@ -218,6 +218,7 @@ func TestExitPositionRollsBackOnPerpNoFill(t *testing.T) {
 	marketData := newTestMarket(t, srv.URL)
 	accountClient := newTestAccount(t, srv.URL)
 	stub := &stubRestClient{orderIDs: []string{"spot-1", "perp-1", "rollback-1"}}
+	metricsStub, counters := newTestMetrics()
 	app := &App{
 		cfg: &config.Config{Strategy: config.StrategyConfig{
 			EntryTimeout:      30 * time.Millisecond,
@@ -227,8 +228,8 @@ func TestExitPositionRollsBackOnPerpNoFill(t *testing.T) {
 		market:   marketData,
 		account:  accountClient,
 		executor: exec.New(stub, nil, zap.NewNop()),
-		metrics:  metrics.NewNoop(),
-		alerts:   alerts.NewTelegram(false, zap.NewNop()),
+		metrics:  metricsStub,
+		alerts:   alerts.NewTelegram(config.TelegramConfig{Enabled: false}, zap.NewNop()),
 		strategy: strategy.NewStateMachine(),
 	}
 	app.strategy.Apply(strategy.EventEnter)
@@ -246,6 +247,9 @@ func TestExitPositionRollsBackOnPerpNoFill(t *testing.T) {
 	err := app.exitPosition(context.Background(), snap)
 	if err == nil {
 		t.Fatalf("expected error on perp exit no fill")
+	}
+	if counters.exitFailed.count != 1 {
+		t.Fatalf("expected exit failed count 1, got %d", counters.exitFailed.count)
 	}
 	if app.strategy.State != strategy.StateHedgeOK {
 		t.Fatalf("expected strategy to return to hedge ok, got %s", app.strategy.State)
@@ -286,7 +290,7 @@ func TestExitPositionSuccess(t *testing.T) {
 		account:  accountClient,
 		executor: exec.New(stub, nil, zap.NewNop()),
 		metrics:  metrics.NewNoop(),
-		alerts:   alerts.NewTelegram(false, zap.NewNop()),
+		alerts:   alerts.NewTelegram(config.TelegramConfig{Enabled: false}, zap.NewNop()),
 		strategy: strategy.NewStateMachine(),
 	}
 	app.strategy.Apply(strategy.EventEnter)
@@ -310,6 +314,407 @@ func TestExitPositionSuccess(t *testing.T) {
 	if got := len(stub.orders); got != 2 {
 		t.Fatalf("expected 2 orders (spot, perp), got %d", got)
 	}
+}
+
+func TestEnterPositionFailureIncrementsMetric(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/info", func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		switch payload["type"] {
+		case "metaAndAssetCtxs":
+			writeJSON(w, perpCtxPayload())
+		case "spotMetaAndAssetCtxs":
+			writeJSON(w, spotCtxPayload())
+		default:
+			writeJSON(w, []any{})
+		}
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	marketData := newTestMarket(t, srv.URL)
+	metricsStub, counters := newTestMetrics()
+	app := &App{
+		cfg: &config.Config{Strategy: config.StrategyConfig{
+			EntryTimeout:      30 * time.Millisecond,
+			EntryPollInterval: 5 * time.Millisecond,
+		}},
+		log:      zap.NewNop(),
+		market:   marketData,
+		metrics:  metricsStub,
+		alerts:   alerts.NewTelegram(config.TelegramConfig{Enabled: false}, zap.NewNop()),
+		strategy: strategy.NewStateMachine(),
+	}
+
+	snap := strategy.MarketSnapshot{
+		PerpAsset:    "BTC",
+		SpotAsset:    "UBTC",
+		NotionalUSD:  100,
+		SpotMidPrice: 0,
+		PerpMidPrice: 0,
+	}
+	err := app.enterPosition(context.Background(), snap)
+	if err == nil {
+		t.Fatalf("expected entry error")
+	}
+	if counters.entryFailed.count != 1 {
+		t.Fatalf("expected entry failed count 1, got %d", counters.entryFailed.count)
+	}
+}
+
+func TestRebalanceDeltaPlacesPerpOrder(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/info", func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		switch payload["type"] {
+		case "metaAndAssetCtxs":
+			writeJSON(w, perpCtxPayload())
+		case "spotMetaAndAssetCtxs":
+			writeJSON(w, spotCtxPayload())
+		default:
+			writeJSON(w, []any{})
+		}
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	marketData := newTestMarket(t, srv.URL)
+	stub := &stubRestClient{orderIDs: []string{"hedge-1"}}
+	app := &App{
+		cfg: &config.Config{Strategy: config.StrategyConfig{
+			DeltaBandUSD:   20,
+			MinExposureUSD: 10,
+		}},
+		log:      zap.NewNop(),
+		market:   marketData,
+		executor: exec.New(stub, nil, zap.NewNop()),
+		metrics:  metrics.NewNoop(),
+	}
+	snap := strategy.MarketSnapshot{
+		PerpAsset:    "BTC",
+		SpotAsset:    "UBTC",
+		SpotMidPrice: 100,
+		PerpMidPrice: 100,
+		SpotBalance:  1,
+		PerpPosition: -0.4,
+	}
+	if err := app.rebalanceDelta(context.Background(), snap); err != nil {
+		t.Fatalf("rebalance delta: %v", err)
+	}
+	if got := len(stub.orders); got != 1 {
+		t.Fatalf("expected 1 hedge order, got %d", got)
+	}
+	order := stub.orders[0]
+	if order.Asset != 0 {
+		t.Fatalf("expected perp asset 0, got %d", order.Asset)
+	}
+	if order.IsBuy {
+		t.Fatalf("expected sell order, got buy")
+	}
+	if order.ReduceOnly {
+		t.Fatalf("expected reduce-only=false, got true")
+	}
+	if math.Abs(order.Size-0.6) > 1e-9 {
+		t.Fatalf("expected size 0.6, got %f", order.Size)
+	}
+}
+
+func TestRebalanceDeltaSkipsWithinBand(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/info", func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		switch payload["type"] {
+		case "metaAndAssetCtxs":
+			writeJSON(w, perpCtxPayload())
+		case "spotMetaAndAssetCtxs":
+			writeJSON(w, spotCtxPayload())
+		default:
+			writeJSON(w, []any{})
+		}
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	marketData := newTestMarket(t, srv.URL)
+	stub := &stubRestClient{orderIDs: []string{"hedge-1"}}
+	app := &App{
+		cfg: &config.Config{Strategy: config.StrategyConfig{
+			DeltaBandUSD:   100,
+			MinExposureUSD: 10,
+		}},
+		log:      zap.NewNop(),
+		market:   marketData,
+		executor: exec.New(stub, nil, zap.NewNop()),
+		metrics:  metrics.NewNoop(),
+	}
+	snap := strategy.MarketSnapshot{
+		PerpAsset:    "BTC",
+		SpotAsset:    "UBTC",
+		SpotMidPrice: 100,
+		PerpMidPrice: 100,
+		SpotBalance:  1,
+		PerpPosition: -0.4,
+	}
+	if err := app.rebalanceDelta(context.Background(), snap); err != nil {
+		t.Fatalf("rebalance delta: %v", err)
+	}
+	if got := len(stub.orders); got != 0 {
+		t.Fatalf("expected no hedge orders, got %d", got)
+	}
+}
+
+func TestConnectivityKillSwitchRetriesCancel(t *testing.T) {
+	stub := &stubRestClient{}
+	metricsStub, counters := newTestMetrics()
+	app := &App{
+		cfg:      &config.Config{Risk: config.RiskConfig{MaxMarketAge: time.Second}},
+		log:      zap.NewNop(),
+		executor: exec.New(stub, nil, zap.NewNop()),
+		metrics:  metricsStub,
+	}
+	openOrders := []map[string]any{{"oid": "1", "asset": 1}}
+	if err := app.checkConnectivity(context.Background(), openOrders, 2*time.Second, 0); err == nil {
+		t.Fatalf("expected connectivity error")
+	}
+	if !app.killSwitchActive {
+		t.Fatalf("expected kill switch active")
+	}
+	if got := len(stub.cancels); got != 1 {
+		t.Fatalf("expected 1 cancel attempt, got %d", got)
+	}
+	if counters.killEngaged.count != 1 {
+		t.Fatalf("expected kill switch engaged count 1, got %d", counters.killEngaged.count)
+	}
+	if err := app.checkConnectivity(context.Background(), openOrders, 2*time.Second, 0); err == nil {
+		t.Fatalf("expected connectivity error on retry")
+	}
+	if got := len(stub.cancels); got != 2 {
+		t.Fatalf("expected 2 cancel attempts, got %d", got)
+	}
+	if counters.killEngaged.count != 1 {
+		t.Fatalf("expected kill switch engaged count to remain 1, got %d", counters.killEngaged.count)
+	}
+}
+
+func TestConnectivityKillSwitchRestores(t *testing.T) {
+	stub := &stubRestClient{}
+	metricsStub, counters := newTestMetrics()
+	app := &App{
+		cfg:      &config.Config{Risk: config.RiskConfig{MaxMarketAge: time.Second}},
+		log:      zap.NewNop(),
+		executor: exec.New(stub, nil, zap.NewNop()),
+		metrics:  metricsStub,
+	}
+	openOrders := []map[string]any{{"oid": "1", "asset": 1}}
+	_ = app.checkConnectivity(context.Background(), openOrders, 2*time.Second, 0)
+	if !app.killSwitchActive {
+		t.Fatalf("expected kill switch active")
+	}
+	if err := app.checkConnectivity(context.Background(), openOrders, 0, 0); err != nil {
+		t.Fatalf("expected connectivity restored, got %v", err)
+	}
+	if app.killSwitchActive {
+		t.Fatalf("expected kill switch cleared")
+	}
+	if counters.killEngaged.count != 1 {
+		t.Fatalf("expected kill switch engaged count 1, got %d", counters.killEngaged.count)
+	}
+	if counters.killRestored.count != 1 {
+		t.Fatalf("expected kill switch restored count 1, got %d", counters.killRestored.count)
+	}
+}
+
+func TestFundingRegimeConfirmations(t *testing.T) {
+	app := &App{
+		cfg: &config.Config{Strategy: config.StrategyConfig{
+			MinFundingRate:          0.01,
+			CarryBufferUSD:          1,
+			FundingConfirmations:    2,
+			FundingDipConfirmations: 2,
+		}},
+	}
+	_, okConfirmed, badConfirmed := app.updateFundingRegime(0.01, 0.01, 2, 1)
+	if okConfirmed {
+		t.Fatalf("expected funding ok not yet confirmed")
+	}
+	if badConfirmed {
+		t.Fatalf("expected funding bad not confirmed")
+	}
+	_, okConfirmed, _ = app.updateFundingRegime(0.01, 0.01, 2, 1)
+	if !okConfirmed {
+		t.Fatalf("expected funding ok confirmed")
+	}
+	_, okConfirmed, badConfirmed = app.updateFundingRegime(0.0, 0.01, 0.5, 1)
+	if okConfirmed {
+		t.Fatalf("expected funding ok reset on dip")
+	}
+	if badConfirmed {
+		t.Fatalf("expected funding dip not yet confirmed")
+	}
+	_, _, badConfirmed = app.updateFundingRegime(0.0, 0.01, 0.5, 1)
+	if !badConfirmed {
+		t.Fatalf("expected funding dip confirmed")
+	}
+}
+
+func TestFundingForecastWarningResetsOnSuccess(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if payload["type"] != "predictedFundings" {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, []any{
+			[]any{"BTC", []any{
+				[]any{"HlPerp", map[string]any{"fundingRate": "0.001", "nextFundingTime": 1700000000000}},
+			}},
+		})
+	}))
+	defer server.Close()
+
+	restClient := rest.New(server.URL, 2*time.Second, zap.NewNop())
+	marketData := market.New(restClient, nil, zap.NewNop())
+	app := &App{market: marketData, log: zap.NewNop()}
+	app.fundingForecastWarned = true
+	app.refreshFundingForecast(context.Background())
+	if app.fundingForecastWarned {
+		t.Fatalf("expected funding forecast warning reset after success")
+	}
+}
+
+func TestShouldDeferExitForFunding(t *testing.T) {
+	now := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
+	app := &App{cfg: &config.Config{Strategy: config.StrategyConfig{
+		ExitFundingGuard: 2 * time.Minute,
+	}}}
+	forecast := market.FundingForecast{
+		NextFunding: now.Add(90 * time.Second),
+		HasNext:     true,
+		HasRate:     true,
+		Rate:        0.0001,
+	}
+	guarded, until := app.shouldDeferExitForFunding(now, forecast, true, 0.0001)
+	if !guarded {
+		t.Fatalf("expected exit to be guarded")
+	}
+	if until != 90*time.Second {
+		t.Fatalf("expected time-to-funding 90s, got %s", until)
+	}
+
+	forecast.NextFunding = now.Add(5 * time.Minute)
+	guarded, _ = app.shouldDeferExitForFunding(now, forecast, true, 0.0001)
+	if guarded {
+		t.Fatalf("expected exit not guarded when outside window")
+	}
+}
+
+func TestShouldDeferExitForFundingNegativeRate(t *testing.T) {
+	now := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
+	app := &App{cfg: &config.Config{Strategy: config.StrategyConfig{
+		ExitFundingGuard: 2 * time.Minute,
+	}}}
+	forecast := market.FundingForecast{
+		NextFunding: now.Add(30 * time.Second),
+		HasNext:     true,
+		HasRate:     true,
+		Rate:        -0.0001,
+	}
+	guarded, _ := app.shouldDeferExitForFunding(now, forecast, true, -0.0001)
+	if guarded {
+		t.Fatalf("expected exit not guarded for negative funding rate")
+	}
+}
+
+func TestShouldDeferExitForFundingDisabled(t *testing.T) {
+	enabled := false
+	now := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
+	app := &App{cfg: &config.Config{Strategy: config.StrategyConfig{
+		ExitFundingGuard:        2 * time.Minute,
+		ExitFundingGuardEnabled: &enabled,
+	}}}
+	forecast := market.FundingForecast{
+		NextFunding: now.Add(30 * time.Second),
+		HasNext:     true,
+		HasRate:     true,
+		Rate:        0.0001,
+	}
+	guarded, _ := app.shouldDeferExitForFunding(now, forecast, true, 0.0001)
+	if guarded {
+		t.Fatalf("expected exit not guarded when guard disabled")
+	}
+}
+
+type testCounter struct {
+	count int
+}
+
+func (c *testCounter) Inc() {
+	c.count++
+}
+
+type metricsCounters struct {
+	ordersPlaced *testCounter
+	ordersFailed *testCounter
+	entryFailed  *testCounter
+	exitFailed   *testCounter
+	killEngaged  *testCounter
+	killRestored *testCounter
+}
+
+func newTestMetrics() (*metrics.Metrics, *metricsCounters) {
+	counters := &metricsCounters{
+		ordersPlaced: &testCounter{},
+		ordersFailed: &testCounter{},
+		entryFailed:  &testCounter{},
+		exitFailed:   &testCounter{},
+		killEngaged:  &testCounter{},
+		killRestored: &testCounter{},
+	}
+	m := &metrics.Metrics{
+		OrdersPlaced:       counters.ordersPlaced,
+		OrdersFailed:       counters.ordersFailed,
+		EntryFailed:        counters.entryFailed,
+		ExitFailed:         counters.exitFailed,
+		KillSwitchEngaged:  counters.killEngaged,
+		KillSwitchRestored: counters.killRestored,
+	}
+	return m, counters
 }
 
 type fillServer struct {
