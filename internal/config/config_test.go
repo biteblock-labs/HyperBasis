@@ -33,6 +33,12 @@ func TestStrategyEntryDefaults(t *testing.T) {
 	if cfg.Strategy.EntryPollInterval <= 0 {
 		t.Fatalf("expected entry poll interval default, got %v", cfg.Strategy.EntryPollInterval)
 	}
+	if cfg.Strategy.EntryCooldown <= 0 {
+		t.Fatalf("expected entry cooldown default, got %v", cfg.Strategy.EntryCooldown)
+	}
+	if cfg.Strategy.HedgeCooldown <= 0 {
+		t.Fatalf("expected hedge cooldown default, got %v", cfg.Strategy.HedgeCooldown)
+	}
 	if cfg.Strategy.ExitFundingGuard <= 0 {
 		t.Fatalf("expected exit funding guard default, got %v", cfg.Strategy.ExitFundingGuard)
 	}
@@ -142,6 +148,32 @@ func TestValidateRejectsNegativeDeltaBand(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsNegativeEntryCooldown(t *testing.T) {
+	cfg := &Config{Strategy: StrategyConfig{
+		PerpAsset:     "BTC",
+		SpotAsset:     "UBTC",
+		NotionalUSD:   1,
+		EntryCooldown: -1 * time.Second,
+	}}
+	applyDefaults(cfg)
+	if err := validate(cfg); err == nil {
+		t.Fatalf("expected error for negative entry cooldown")
+	}
+}
+
+func TestValidateRejectsNegativeHedgeCooldown(t *testing.T) {
+	cfg := &Config{Strategy: StrategyConfig{
+		PerpAsset:     "BTC",
+		SpotAsset:     "UBTC",
+		NotionalUSD:   1,
+		HedgeCooldown: -1 * time.Second,
+	}}
+	applyDefaults(cfg)
+	if err := validate(cfg); err == nil {
+		t.Fatalf("expected error for negative hedge cooldown")
+	}
+}
+
 func TestValidateRejectsNegativeExitFundingGuard(t *testing.T) {
 	cfg := &Config{Strategy: StrategyConfig{
 		PerpAsset:        "BTC",
@@ -237,6 +269,7 @@ func TestValidateRejectsNegativeCarrySettings(t *testing.T) {
 		NotionalUSD:             1,
 		FeeBps:                  -1,
 		SlippageBps:             -1,
+		IOCPriceBps:             -1,
 		CarryBufferUSD:          -1,
 		FundingConfirmations:    -1,
 		FundingDipConfirmations: -1,

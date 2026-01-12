@@ -1,8 +1,16 @@
 package market
 
 import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
+
+	"hl-carry-bot/internal/hl/rest"
+
+	"go.uber.org/zap"
 )
 
 func TestParseFundingForecastsSliceMaps(t *testing.T) {
@@ -46,7 +54,7 @@ func TestParseFundingForecastsProviderList(t *testing.T) {
 	payload := []any{
 		[]any{"BTC", []any{
 			[]any{"BinPerp", map[string]any{"fundingRate": "0.002", "nextFundingTime": 1700000000000}},
-			[]any{"HlPerp", map[string]any{"fundingRate": "0.001", "nextFundingTime": 1700000000000}},
+			[]any{"HlPerp", map[string]any{"fundingRate": "0.001", "nextFundingTime": 1700000000000, "fundingIntervalHours": 1}},
 		}},
 	}
 	out := parseFundingForecasts(payload)
@@ -62,6 +70,9 @@ func TestParseFundingForecastsProviderList(t *testing.T) {
 	}
 	if !forecast.HasNext || forecast.NextFunding.Unix() != 1700000000 {
 		t.Fatalf("expected next funding unix 1700000000, got %v", forecast.NextFunding)
+	}
+	if forecast.Interval != time.Hour {
+		t.Fatalf("expected interval 1h, got %s", forecast.Interval)
 	}
 }
 
@@ -100,5 +111,70 @@ func TestFundingForecastRefreshThrottleUsesAttempts(t *testing.T) {
 	md.lastFundingAttempt = now.Add(-3 * time.Second)
 	if !md.shouldRefreshFundingForecast() {
 		t.Fatalf("expected refresh after window elapses")
+	}
+}
+
+func TestRefreshFundingForecastSetsObservedAt(t *testing.T) {
+	payload := `[[ "BTC", [["HlPerp", {"fundingRate":"0.001","nextFundingTime":1700000000000}]] ]]`
+	mux := http.NewServeMux()
+	mux.HandleFunc("/info", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(payload))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	md := New(rest.New(srv.URL, 2*time.Second, zap.NewNop()), nil, zap.NewNop())
+	md.fundingWindow = 0
+
+	ok, err := md.RefreshFundingForecast(context.Background())
+	if err != nil {
+		t.Fatalf("refresh error: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected refresh to run")
+	}
+	forecast, ok := md.FundingForecast("BTC")
+	if !ok {
+		t.Fatalf("expected BTC forecast")
+	}
+	if forecast.ObservedAt.IsZero() {
+		t.Fatalf("expected observed_at to be set")
+	}
+	if time.Since(forecast.ObservedAt) > 2*time.Second {
+		t.Fatalf("observed_at too old: %s", time.Since(forecast.ObservedAt))
+	}
+}
+
+func TestRefreshFundingForecastRollsForwardNextFunding(t *testing.T) {
+	past := time.Now().Add(-30 * time.Minute).UnixMilli()
+	payload := fmt.Sprintf(`[[ "BTC", [["HlPerp", {"fundingRate":"0.001","nextFundingTime":%d,"fundingIntervalHours":1}]] ]]`, past)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/info", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(payload))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	md := New(rest.New(srv.URL, 2*time.Second, zap.NewNop()), nil, zap.NewNop())
+	md.fundingWindow = 0
+
+	ok, err := md.RefreshFundingForecast(context.Background())
+	if err != nil {
+		t.Fatalf("refresh error: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected refresh to run")
+	}
+	forecast, ok := md.FundingForecast("BTC")
+	if !ok {
+		t.Fatalf("expected BTC forecast")
+	}
+	if forecast.Interval != time.Hour {
+		t.Fatalf("expected interval 1h, got %s", forecast.Interval)
+	}
+	if !forecast.NextFunding.After(forecast.ObservedAt) {
+		t.Fatalf("expected next funding after observed_at, got %s vs %s", forecast.NextFunding, forecast.ObservedAt)
 	}
 }

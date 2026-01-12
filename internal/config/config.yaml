@@ -18,23 +18,26 @@ metrics:
   path: /metrics
 
 strategy:
-  perp_asset: BTC
-  spot_asset: UBTC
-  notional_usd: 1000
-  min_funding_rate: 0.0002
-  max_volatility: 0.02
+  perp_asset: ETH
+  spot_asset: UETH
+  notional_usd: 12
+  min_funding_rate: 0
+  max_volatility: 1
   fee_bps: 0
   slippage_bps: 0
+  ioc_price_bps: 5
   carry_buffer_usd: 0
   funding_confirmations: 1
   funding_dip_confirmations: 1
   delta_band_usd: 5
   min_exposure_usd: 10
   entry_interval: 30s
+  entry_cooldown: 60s
+  hedge_cooldown: 10s
   spot_reconcile_interval: 5m
   entry_timeout: 5s
   entry_poll_interval: 250ms
-  exit_on_funding_dip: true
+  exit_on_funding_dip: false
   exit_funding_guard: 2m
   exit_funding_guard_enabled: true
   candle_interval: 1h

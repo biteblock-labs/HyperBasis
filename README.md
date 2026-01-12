@@ -44,7 +44,10 @@ The bot wires configuration + logging, reconciles account state at startup, cons
 - Exchange nonces are persisted in SQLite to avoid reuse after restarts (startup logs nonce key/seed).
 - The bot persists a strategy snapshot (last action + exposure + last mids) to SQLite and restores strategy state on startup when available.
 - `strategy.min_exposure_usd` treats small residual exposure as dust to avoid tiny exit orders / 422s.
+- IOC orders use a configurable price offset (`strategy.ioc_price_bps`) to improve fill reliability.
+- Entry/hedge cooldowns (`strategy.entry_cooldown`, `strategy.hedge_cooldown`) reduce duplicate orders while account state catches up.
 - Spot balances are refreshed via WS post `spotClearinghouseState` and delta-updated via `userNonFundingLedgerUpdates`; reconcile cadence is `strategy.spot_reconcile_interval`.
+- Funding receipts are polled via `userFunding` after each funding time and logged as "funding payment received".
 - Prometheus metrics are enabled by default on `127.0.0.1:9001` (`metrics.path` is `/metrics`); set `metrics.enabled` to false to disable.
 - Telegram Bot API alerts are available when `telegram.enabled` is true and `HL_TELEGRAM_TOKEN`/`HL_TELEGRAM_CHAT_ID` are set (from `.env` or environment).
 - Placeholder types are used where schemas are unknown.

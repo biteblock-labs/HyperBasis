@@ -62,12 +62,15 @@ type StrategyConfig struct {
 	MaxVolatility           float64       `yaml:"max_volatility"`
 	FeeBps                  float64       `yaml:"fee_bps"`
 	SlippageBps             float64       `yaml:"slippage_bps"`
+	IOCPriceBps             float64       `yaml:"ioc_price_bps"`
 	CarryBufferUSD          float64       `yaml:"carry_buffer_usd"`
 	FundingConfirmations    int           `yaml:"funding_confirmations"`
 	FundingDipConfirmations int           `yaml:"funding_dip_confirmations"`
 	DeltaBandUSD            float64       `yaml:"delta_band_usd"`
 	MinExposureUSD          float64       `yaml:"min_exposure_usd"`
 	EntryInterval           time.Duration `yaml:"entry_interval"`
+	EntryCooldown           time.Duration `yaml:"entry_cooldown"`
+	HedgeCooldown           time.Duration `yaml:"hedge_cooldown"`
 	SpotReconcileInterval   time.Duration `yaml:"spot_reconcile_interval"`
 	EntryTimeout            time.Duration `yaml:"entry_timeout"`
 	EntryPollInterval       time.Duration `yaml:"entry_poll_interval"`
@@ -148,6 +151,16 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Strategy.EntryInterval == 0 {
 		cfg.Strategy.EntryInterval = 30 * time.Second
+	}
+	if cfg.Strategy.EntryCooldown == 0 {
+		if cfg.Strategy.EntryInterval > 0 {
+			cfg.Strategy.EntryCooldown = cfg.Strategy.EntryInterval * 2
+		} else {
+			cfg.Strategy.EntryCooldown = 60 * time.Second
+		}
+	}
+	if cfg.Strategy.HedgeCooldown == 0 {
+		cfg.Strategy.HedgeCooldown = 10 * time.Second
 	}
 	if cfg.Strategy.SpotReconcileInterval == 0 {
 		cfg.Strategy.SpotReconcileInterval = 5 * time.Minute
@@ -268,6 +281,9 @@ func validate(cfg *Config) error {
 	if cfg.Strategy.SlippageBps < 0 {
 		return errors.New("strategy.slippage_bps must be >= 0")
 	}
+	if cfg.Strategy.IOCPriceBps < 0 {
+		return errors.New("strategy.ioc_price_bps must be >= 0")
+	}
 	if cfg.Strategy.CarryBufferUSD < 0 {
 		return errors.New("strategy.carry_buffer_usd must be >= 0")
 	}
@@ -279,6 +295,12 @@ func validate(cfg *Config) error {
 	}
 	if cfg.Strategy.DeltaBandUSD < 0 {
 		return errors.New("strategy.delta_band_usd must be >= 0")
+	}
+	if cfg.Strategy.EntryCooldown < 0 {
+		return errors.New("strategy.entry_cooldown must be >= 0")
+	}
+	if cfg.Strategy.HedgeCooldown < 0 {
+		return errors.New("strategy.hedge_cooldown must be >= 0")
 	}
 	if cfg.Strategy.SpotReconcileInterval < 0 {
 		return errors.New("strategy.spot_reconcile_interval must be >= 0")

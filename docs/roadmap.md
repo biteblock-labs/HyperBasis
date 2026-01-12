@@ -22,7 +22,7 @@ REST (POST https://api.hyperliquid.xyz/info):
 - Spot balances: `spotClearinghouseState` with user address
 - Open orders: `openOrders`
 - User fills: `userFillsByTime` (fallback)
-- User funding: `userFunding` (funding payment history; schema validation in progress)
+- User funding: `userFunding` (funding payment history; schema validated and used to log receipts)
 - Perp positions/margin: `clearinghouseState`
 
 REST (POST https://api.hyperliquid.xyz/exchange):
@@ -69,6 +69,7 @@ HEDGE_OK flow:
 - Enforce margin/health thresholds to gate actions when buffers are thin.
 - Connectivity kill switch: cancel open orders and pause trading when market/account data is stale.
 - Exit when net expected carry (after fees/slippage + buffer) stays below threshold for N ticks.
+- Throttle entry/hedge actions with cooldowns to avoid duplicate orders while account state catches up.
 
 EXIT flow:
 - Size from actual spot/perp exposure (not notional); skip legs below `strategy.min_exposure_usd` to avoid dust/tiny orders.
@@ -108,10 +109,13 @@ If exposure exists and funding is bad: exit.
 - [x] Exchange constraints observed: minimum order value (10 USDC) and tick-size enforcement for price formatting.
 - [x] Dust handling: skip exits below `strategy.min_exposure_usd` to avoid tiny orders / 422s.
 - [x] Funds placement matters: spot orders require spot wallet funds (`spotClearinghouseState`); perp wallet funds appear under `clearinghouseState`.
+- [x] Entry rebalances USDC between spot/perp wallets before placing orders; total USDC should cover both legs.
 - [x] Partial fills: reconcile fills via WS events or user fills; hedge only the executed size; consider IOC for spot to avoid lingering partials.
 - [x] Exchange nonces persist in SQLite to avoid reuse on restart.
 - [x] Funding timing: predictedFundings live verified (HlPerp hourly + nextFundingTime ms); exit-timing guard around nextFundingTime implemented.
-- [ ] Funding data sources: predictedFundings verified and parsed; `userFunding` docs show delta-based event shape (coin/usdc/fundingRate + time ms) and parser updated; live verification deferred until production runtime when the bot holds a perp position across a funding event.
+- [x] Funding data sources: predictedFundings verified and parsed; `userFunding` schema verified via public address (delta-based entries) and confirmed on our own account; funding receipts are logged after each funding time.
+- [x] IOC price offsets applied to entry/hedge/rollback orders to improve fill reliability.
+- [x] Post-entry reconcile and entry/hedge cooldowns to avoid repeated orders during state catch-up.
 - [x] Fees and slippage: compute expected carry net of fees/spread before entry; avoid churn when funding is low (uses configured bps).
 - [ ] Margin and collateral: verify how spot value contributes to perp margin on-chain; maintain buffers and avoid full-capital spot buys.
 - [ ] WS semantics: handle `isSnapshot: true` correctly to avoid double-counting; resubscribe on reconnect.

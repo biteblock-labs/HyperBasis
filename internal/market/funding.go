@@ -13,6 +13,7 @@ type FundingForecast struct {
 	Rate         float64
 	NextFunding  time.Time
 	ObservedAt   time.Time
+	Interval     time.Duration
 	HasNext      bool
 	HasRate      bool
 	RawAssetName string
@@ -39,6 +40,11 @@ func (m *MarketData) RefreshFundingForecast(ctx context.Context) (bool, error) {
 		return false, errors.New("predicted fundings missing")
 	}
 	now = time.Now().UTC()
+	for key, forecast := range forecasts {
+		forecast.ObservedAt = now
+		forecast = normalizeFundingForecast(forecast, now)
+		forecasts[key] = forecast
+	}
 	m.mu.Lock()
 	m.fundingForecasts = forecasts
 	m.lastFundingFetch = now
@@ -138,6 +144,9 @@ func parseFundingForecastItem(asset string, payload any) (FundingForecast, bool)
 			forecast.NextFunding = ts
 			forecast.HasNext = true
 		}
+		if interval := floatFromMap(data, "fundingIntervalHours", "fundingIntervalHrs", "intervalHours", "intervalHrs"); interval > 0 {
+			forecast.Interval = time.Duration(interval * float64(time.Hour))
+		}
 		if !forecast.HasRate && !forecast.HasNext {
 			return FundingForecast{}, false
 		}
@@ -235,10 +244,30 @@ func parseProviderForecast(asset, source string, payload any) (FundingForecast, 
 		forecast.NextFunding = ts
 		forecast.HasNext = true
 	}
+	if interval := floatFromMap(data, "fundingIntervalHours", "fundingIntervalHrs", "intervalHours", "intervalHrs"); interval > 0 {
+		forecast.Interval = time.Duration(interval * float64(time.Hour))
+	}
 	if !forecast.HasRate && !forecast.HasNext {
 		return FundingForecast{}, false
 	}
 	return forecast, true
+}
+
+func normalizeFundingForecast(forecast FundingForecast, now time.Time) FundingForecast {
+	if !forecast.HasNext || forecast.NextFunding.IsZero() {
+		return forecast
+	}
+	if forecast.NextFunding.After(now) {
+		return forecast
+	}
+	if forecast.Interval <= 0 {
+		return forecast
+	}
+	steps := now.Sub(forecast.NextFunding)/forecast.Interval + 1
+	if steps > 0 {
+		forecast.NextFunding = forecast.NextFunding.Add(time.Duration(steps) * forecast.Interval)
+	}
+	return forecast
 }
 
 func timeFromMap(m map[string]any, keys ...string) (time.Time, bool) {

@@ -6,21 +6,7 @@ func OrderIDFromResponse(resp map[string]any) string {
 	if resp == nil {
 		return ""
 	}
-	for _, key := range []string{"orderId", "orderID", "oid", "id"} {
-		if v, ok := resp[key]; ok {
-			if id := stringFromAny(v); id != "" {
-				return id
-			}
-		}
-	}
-	for _, key := range []string{"response", "data"} {
-		if nested, ok := resp[key].(map[string]any); ok {
-			if id := OrderIDFromResponse(nested); id != "" {
-				return id
-			}
-		}
-	}
-	return ""
+	return orderIDFromAny(resp)
 }
 
 func stringFromAny(v any) string {
@@ -36,4 +22,27 @@ func stringFromAny(v any) string {
 	default:
 		return ""
 	}
+}
+
+func orderIDFromAny(v any) string {
+	switch val := v.(type) {
+	case map[string]any:
+		for _, key := range []string{"orderId", "orderID", "oid", "id"} {
+			if id := stringFromAny(val[key]); id != "" {
+				return id
+			}
+		}
+		for _, nested := range val {
+			if id := orderIDFromAny(nested); id != "" {
+				return id
+			}
+		}
+	case []any:
+		for _, nested := range val {
+			if id := orderIDFromAny(nested); id != "" {
+				return id
+			}
+		}
+	}
+	return ""
 }
