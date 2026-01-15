@@ -47,6 +47,7 @@ type MarketData struct {
 	perpCtx            map[string]PerpContext
 	spotCtx            map[string]SpotContext
 	candleCloses       map[string][]float64
+	lastCandles        map[string]Candle
 	lastCtxRefresh     time.Time
 	lastMidUpdate      time.Time
 	lastFundingFetch   time.Time
@@ -73,6 +74,7 @@ func New(restClient *rest.Client, wsClient *ws.Client, log *zap.Logger) *MarketD
 		perpCtx:          make(map[string]PerpContext),
 		spotCtx:          make(map[string]SpotContext),
 		candleCloses:     make(map[string][]float64),
+		lastCandles:      make(map[string]Candle),
 		ctxRefreshWindow: 30 * time.Second,
 		fundingWindow:    60 * time.Second,
 		candleWindow:     20,
@@ -273,6 +275,14 @@ func (m *MarketData) Volatility(asset string) (float64, bool) {
 	return val, ok
 }
 
+func (m *MarketData) LatestCandle(asset string) (Candle, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	key := candleKey(asset, m.candleInterval)
+	candle, ok := m.lastCandles[key]
+	return candle, ok
+}
+
 func (m *MarketData) handleMessage(msg json.RawMessage) {
 	var payload map[string]any
 	if err := json.Unmarshal(msg, &payload); err != nil {
@@ -319,18 +329,45 @@ func (m *MarketData) updateMids(payload map[string]any) {
 }
 
 func (m *MarketData) updateCandle(payload map[string]any) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	candle, ok := parseCandleOHLC(payload)
+	if ok {
+		if candle.Interval == "" {
+			candle.Interval = m.candleInterval
+		}
+		if candle.Open == 0 {
+			candle.Open = candle.Close
+		}
+		if candle.High == 0 {
+			candle.High = candle.Close
+		}
+		if candle.Low == 0 {
+			candle.Low = candle.Close
+		}
+		if candle.Start.IsZero() {
+			candle.Start = time.Now().UTC()
+		}
+		key := candleKey(candle.Asset, candle.Interval)
+		m.lastCandles[key] = candle
+	}
 	asset, close, ok := parseCandle(payload)
 	if !ok {
 		return
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	closes := append(m.candleCloses[asset], close)
 	if len(closes) > m.candleWindow {
 		closes = closes[len(closes)-m.candleWindow:]
 	}
 	m.candleCloses[asset] = closes
 	m.volatility[asset] = computeVolatility(closes)
+}
+
+func candleKey(asset, interval string) string {
+	if interval == "" {
+		return asset
+	}
+	return asset + "|" + interval
 }
 
 func computeVolatility(closes []float64) float64 {

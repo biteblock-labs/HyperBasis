@@ -1,0 +1,35 @@
+[Unit]
+Description=Hyperliquid Carry Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=meltingclock
+Group=meltingclock
+WorkingDirectory=/home/meltingclock/HyperBasis
+EnvironmentFile=-/home/meltingclock/HyperBasis/.env
+ExecStart=/home/meltingclock/HyperBasis/bin/hl-carry-bot -config /home/meltingclock/HyperBasis/internal/config/config.yaml
+Restart=on-failure
+RestartSec=5s
+StartLimitIntervalSec=60
+StartLimitBurst=3
+TimeoutStopSec=20s
+UMask=0077
+StateDirectory=hl-carry-bot
+RuntimeDirectory=hl-carry-bot
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/meltingclock/HyperBasis/data
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

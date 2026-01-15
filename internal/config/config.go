@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -11,14 +12,15 @@ import (
 )
 
 type Config struct {
-	Log      LoggingConfig  `yaml:"log"`
-	REST     RESTConfig     `yaml:"rest"`
-	WS       WSConfig       `yaml:"ws"`
-	State    StateConfig    `yaml:"state"`
-	Metrics  MetricsConfig  `yaml:"metrics"`
-	Strategy StrategyConfig `yaml:"strategy"`
-	Risk     RiskConfig     `yaml:"risk"`
-	Telegram TelegramConfig `yaml:"telegram"`
+	Log       LoggingConfig   `yaml:"log"`
+	REST      RESTConfig      `yaml:"rest"`
+	WS        WSConfig        `yaml:"ws"`
+	State     StateConfig     `yaml:"state"`
+	Metrics   MetricsConfig   `yaml:"metrics"`
+	Timescale TimescaleConfig `yaml:"timescale"`
+	Strategy  StrategyConfig  `yaml:"strategy"`
+	Risk      RiskConfig      `yaml:"risk"`
+	Telegram  TelegramConfig  `yaml:"telegram"`
 }
 
 type LoggingConfig struct {
@@ -44,6 +46,16 @@ type MetricsConfig struct {
 	Enabled *bool  `yaml:"enabled"`
 	Address string `yaml:"address"`
 	Path    string `yaml:"path"`
+}
+
+type TimescaleConfig struct {
+	Enabled         bool          `yaml:"enabled"`
+	DSN             string        `yaml:"dsn"`
+	Schema          string        `yaml:"schema"`
+	MaxOpenConns    int           `yaml:"max_open_conns"`
+	MaxIdleConns    int           `yaml:"max_idle_conns"`
+	ConnMaxLifetime time.Duration `yaml:"conn_max_lifetime"`
+	QueueSize       int           `yaml:"queue_size"`
 }
 
 func (m MetricsConfig) EnabledValue() bool {
@@ -91,10 +103,21 @@ type RiskConfig struct {
 }
 
 type TelegramConfig struct {
-	Enabled bool   `yaml:"enabled"`
-	Token   string `yaml:"token"`
-	ChatID  string `yaml:"chat_id"`
+	Enabled                bool          `yaml:"enabled"`
+	Token                  string        `yaml:"token"`
+	ChatID                 string        `yaml:"chat_id"`
+	OperatorEnabled        bool          `yaml:"operator_enabled"`
+	OperatorPollInterval   time.Duration `yaml:"operator_poll_interval"`
+	OperatorAllowedUserIDs []int64       `yaml:"operator_allowed_user_ids"`
 }
+
+const (
+	// Observed Hyperliquid minimum order value on mainnet.
+	minOrderValueUSD = 10.0
+
+	minDeltaBandUSD = 2.0
+	deltaBandRatio  = 0.05
+)
 
 func Load(path string) (*Config, error) {
 	if path == "" {
@@ -149,6 +172,24 @@ func applyDefaults(cfg *Config) {
 	if cfg.Metrics.Path == "" {
 		cfg.Metrics.Path = "/metrics"
 	}
+	if cfg.Timescale.Schema == "" {
+		cfg.Timescale.Schema = "public"
+	}
+	if cfg.Timescale.QueueSize == 0 {
+		cfg.Timescale.QueueSize = 256
+	}
+	if cfg.Timescale.MaxOpenConns == 0 {
+		cfg.Timescale.MaxOpenConns = 5
+	}
+	if cfg.Timescale.MaxIdleConns == 0 {
+		cfg.Timescale.MaxIdleConns = 5
+	}
+	if cfg.Timescale.ConnMaxLifetime == 0 {
+		cfg.Timescale.ConnMaxLifetime = 5 * time.Minute
+	}
+	if cfg.Telegram.OperatorPollInterval == 0 {
+		cfg.Telegram.OperatorPollInterval = 3 * time.Second
+	}
 	if cfg.Strategy.EntryInterval == 0 {
 		cfg.Strategy.EntryInterval = 30 * time.Second
 	}
@@ -172,10 +213,12 @@ func applyDefaults(cfg *Config) {
 		cfg.Strategy.FundingDipConfirmations = 1
 	}
 	if cfg.Strategy.DeltaBandUSD == 0 {
-		cfg.Strategy.DeltaBandUSD = 5
+		if derived := deriveDeltaBandUSD(cfg.Strategy.NotionalUSD); derived > 0 {
+			cfg.Strategy.DeltaBandUSD = derived
+		}
 	}
 	if cfg.Strategy.MinExposureUSD == 0 {
-		cfg.Strategy.MinExposureUSD = 10
+		cfg.Strategy.MinExposureUSD = deriveMinExposureUSD()
 	}
 	if cfg.Strategy.EntryTimeout == 0 {
 		cfg.Strategy.EntryTimeout = 5 * time.Second
@@ -207,20 +250,19 @@ func applyDefaults(cfg *Config) {
 		}
 	}
 	if cfg.Risk.MaxMarketAge == 0 {
-		cfg.Risk.MaxMarketAge = 2 * time.Minute
+		cfg.Risk.MaxMarketAge = deriveMaxMarketAge(cfg.Strategy.EntryInterval, cfg.WS.PingInterval)
 	}
 	if cfg.Risk.MaxAccountAge == 0 {
-		if cfg.Strategy.SpotReconcileInterval > 0 {
-			cfg.Risk.MaxAccountAge = cfg.Strategy.SpotReconcileInterval * 2
-		} else {
-			cfg.Risk.MaxAccountAge = 10 * time.Minute
-		}
+		cfg.Risk.MaxAccountAge = deriveMaxAccountAge(cfg.Strategy.EntryInterval, cfg.WS.PingInterval, cfg.Strategy.SpotReconcileInterval)
 	}
 }
 
 func applyEnvOverrides(cfg *Config) {
 	if cfg == nil {
 		return
+	}
+	if dsn := strings.TrimSpace(os.Getenv("HL_TIMESCALE_DSN")); dsn != "" {
+		cfg.Timescale.DSN = dsn
 	}
 	if token := strings.TrimSpace(os.Getenv("HL_TELEGRAM_TOKEN")); token != "" {
 		cfg.Telegram.Token = token
@@ -311,6 +353,26 @@ func validate(cfg *Config) error {
 	if cfg.Metrics.Path == "" || !strings.HasPrefix(cfg.Metrics.Path, "/") {
 		return errors.New("metrics.path must start with /")
 	}
+	if cfg.Timescale.Enabled {
+		if strings.TrimSpace(cfg.Timescale.DSN) == "" {
+			return errors.New("timescale.dsn is required when timescale.enabled is true")
+		}
+		if cfg.Timescale.QueueSize <= 0 {
+			return errors.New("timescale.queue_size must be > 0")
+		}
+		if cfg.Timescale.MaxOpenConns < 0 {
+			return errors.New("timescale.max_open_conns must be >= 0")
+		}
+		if cfg.Timescale.MaxIdleConns < 0 {
+			return errors.New("timescale.max_idle_conns must be >= 0")
+		}
+		if cfg.Timescale.ConnMaxLifetime < 0 {
+			return errors.New("timescale.conn_max_lifetime must be >= 0")
+		}
+		if !isValidIdentifier(cfg.Timescale.Schema) {
+			return errors.New("timescale.schema must be alphanumeric/underscore and start with a letter or underscore")
+		}
+	}
 	if cfg.Risk.MinMarginRatio < 0 {
 		return errors.New("risk.min_margin_ratio must be >= 0")
 	}
@@ -331,5 +393,85 @@ func validate(cfg *Config) error {
 			return errors.New("telegram token and chat_id are required when telegram.enabled is true (set HL_TELEGRAM_TOKEN and HL_TELEGRAM_CHAT_ID)")
 		}
 	}
+	if cfg.Telegram.OperatorEnabled {
+		if !cfg.Telegram.Enabled {
+			return errors.New("telegram.operator_enabled requires telegram.enabled to be true")
+		}
+		if cfg.Telegram.OperatorPollInterval <= 0 {
+			return errors.New("telegram.operator_poll_interval must be > 0")
+		}
+		if strings.TrimSpace(cfg.Telegram.ChatID) == "" {
+			return errors.New("telegram.chat_id is required when telegram.operator_enabled is true")
+		}
+		if _, err := strconv.ParseInt(strings.TrimSpace(cfg.Telegram.ChatID), 10, 64); err != nil {
+			return errors.New("telegram.chat_id must be numeric when telegram.operator_enabled is true")
+		}
+	}
 	return nil
+}
+
+func isValidIdentifier(value string) bool {
+	if value == "" {
+		return false
+	}
+	for i, r := range value {
+		if r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+			continue
+		}
+		if r >= '0' && r <= '9' {
+			if i == 0 {
+				return false
+			}
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func deriveMinExposureUSD() float64 {
+	return minOrderValueUSD
+}
+
+func deriveDeltaBandUSD(notionalUSD float64) float64 {
+	if notionalUSD <= 0 {
+		return 0
+	}
+	band := notionalUSD * deltaBandRatio
+	if band < minDeltaBandUSD {
+		return minDeltaBandUSD
+	}
+	return band
+}
+
+func deriveMaxMarketAge(entryInterval, pingInterval time.Duration) time.Duration {
+	return maxDuration(
+		scaleDuration(entryInterval, 4),
+		scaleDuration(pingInterval, 2),
+	)
+}
+
+func deriveMaxAccountAge(entryInterval, pingInterval, spotReconcileInterval time.Duration) time.Duration {
+	return maxDuration(
+		scaleDuration(spotReconcileInterval, 2),
+		scaleDuration(entryInterval, 4),
+		scaleDuration(pingInterval, 2),
+	)
+}
+
+func scaleDuration(value time.Duration, multiplier int) time.Duration {
+	if value <= 0 || multiplier <= 0 {
+		return 0
+	}
+	return value * time.Duration(multiplier)
+}
+
+func maxDuration(values ...time.Duration) time.Duration {
+	max := time.Duration(0)
+	for _, value := range values {
+		if value > max {
+			max = value
+		}
+	}
+	return max
 }

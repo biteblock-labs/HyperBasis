@@ -76,6 +76,9 @@ Key settings:
 - `metrics.address`: listen address for metrics (default `127.0.0.1:9001`)
 - `metrics.path`: HTTP path for metrics (default `/metrics`)
 - `telegram.enabled`: enable Telegram alerts (must be true to send)
+- `telegram.operator_enabled`: enable Telegram operator controls (requires `telegram.enabled`)
+- `telegram.operator_poll_interval`: `getUpdates` long-poll interval (e.g., `3s`)
+- `telegram.operator_allowed_user_ids`: optional list of Telegram user IDs allowed to send commands
 - `HL_TELEGRAM_TOKEN`: bot token (keep secret, stored in `.env`)
 - `HL_TELEGRAM_CHAT_ID`: chat or channel id (bot must be admin for channels, stored in `.env`)
 
@@ -90,8 +93,8 @@ Strategy settings:
 - `strategy.carry_buffer_usd`: extra USD buffer required after estimated costs
 - `strategy.funding_confirmations`: consecutive ticks above thresholds before entry
 - `strategy.funding_dip_confirmations`: consecutive ticks below thresholds before exit
-- `strategy.delta_band_usd`: delta drift band before re-hedging with perp IOC
-- `strategy.min_exposure_usd`: treat smaller residuals as dust to avoid tiny exit orders / 422s
+- `strategy.delta_band_usd`: delta drift band before re-hedging with perp IOC (default `max(2, notional_usd*0.05)`)
+- `strategy.min_exposure_usd`: treat smaller residuals as dust to avoid tiny exit orders / 422s (default 10 USDC)
 - `strategy.entry_interval`: how often to evaluate entry/exit
 - `strategy.spot_reconcile_interval`: periodic spot balance refresh cadence (WS post `spotClearinghouseState`)
 - `strategy.entry_timeout` / `strategy.entry_poll_interval`: how long to wait for entry fills
@@ -104,12 +107,63 @@ Risk settings (currently enforced in code):
 - `risk.max_open_orders`
 - `risk.min_margin_ratio`: gate trading when reported margin ratio falls below this threshold
 - `risk.min_health_ratio`: gate trading when account health ratio falls below this threshold
-- `risk.max_market_age`: kill switch if market data age exceeds this window
-- `risk.max_account_age`: kill switch if account data age exceeds this window
+- `risk.max_market_age`: kill switch if market data age exceeds this window (default `max(entry_interval*4, ws.ping_interval*2)`)
+- `risk.max_account_age`: kill switch if account data age exceeds this window (default `max(spot_reconcile_interval*2, entry_interval*4, ws.ping_interval*2)`)
+
+Timescale settings (telemetry storage):
+- `timescale.enabled`: enable TimescaleDB persistence for OHLC + position snapshots
+- `timescale.dsn`: PostgreSQL/Timescale connection string (or `HL_TIMESCALE_DSN`)
+- `timescale.schema`: schema for tables (default `public`)
+- `timescale.queue_size`: in-memory write queue size
+- `timescale.max_open_conns` / `timescale.max_idle_conns` / `timescale.conn_max_lifetime`
+
+## Telegram Operator Controls
+Enable `telegram.operator_enabled` and send these commands in the configured chat:
+- `/status`: show current state, balances, funding, cooldowns, and last funding receipt
+- `/pause`: pause new entry/hedge actions
+- `/resume`: resume new trading actions
+- `/risk show`: show effective and override risk values
+- `/risk set key=value ...`: override risk limits (keys: `max_notional_usd`, `max_open_orders`, `min_margin_ratio`, `min_health_ratio`, `max_market_age`, `max_account_age`)
+- `/risk reset`: clear overrides
+
+Operator commands are audited in SQLite (`ops:audit:*`) and offsets are persisted (`telegram:operator:last_update_id`).
 
 Spot balance source:
 - `spotClearinghouseState` is an `/info` request (HTTP) and can also be called via WebSocket `method: "post"`. It is not a WS subscription type.
 - For live deltas, use `userNonFundingLedgerUpdates` (spot transfers/account-class transfers) + fills and periodically reconcile with `spotClearinghouseState` using `strategy.spot_reconcile_interval`.
+
+## TimescaleDB + Grafana (Tailscale)
+
+Timescale tables are created automatically when `timescale.enabled` is true:
+- `market_ohlc` (OHLC per candle interval)
+- `position_snapshots` (bot state + exposure)
+
+Example DSN:
+```
+postgres://hlbot:secret@127.0.0.1:5432/hl_carry?sslmode=disable
+```
+
+Grafana via Tailscale (do not bind to localhost):
+- Bind Grafana to your Tailscale IP (this host): `100.116.249.72`
+- Example env:
+```
+GF_SERVER_HTTP_ADDR=100.116.249.72
+GF_SERVER_HTTP_PORT=3000
+```
+
+Access from mobile: `http://100.116.249.72:3000`
+
+Template: `scripts/grafana/grafana.env.example`
+
+Dashboard import: `scripts/grafana/hl-carry-bot-dashboard.json`
+
+Provisioning (recommended):
+- Copy `scripts/grafana/provisioning/datasources/timescale.yaml` to `/etc/grafana/provisioning/datasources/`.
+- Copy `scripts/grafana/provisioning/dashboards/hl-carry-bot.yaml` to `/etc/grafana/provisioning/dashboards/`.
+- Copy the dashboard JSON from `scripts/grafana/provisioning/dashboards/hl-carry-bot/` to `/etc/grafana/provisioning/dashboards/hl-carry-bot/`.
+- Set the `GF_TIMESCALE_*` vars from `scripts/grafana/grafana.env.example` in your Grafana environment.
+- Set `PROVISIONING_CFG_DIR` to the same provisioning root used above (ex: `/etc/grafana/provisioning`) so the dashboard provider path resolves.
+- If the OHLC/Volume panels are empty, widen the Grafana time range to cover at least the candle interval (default `1h`) or shorten `strategy.candle_interval`; the "Latest Candle" panel shows the newest stored candle.
 
 ## State / Data (`hl-carry-bot.db`)
 
@@ -161,14 +215,32 @@ The repo includes a reference unit: `scripts/systemd/hl-carry-bot.service`.
 
 Typical layout:
 - `/opt/hl-carry-bot/hl-carry-bot` (binary)
-- `/opt/hl-carry-bot/config.yaml` (config)
-- `/opt/hl-carry-bot/.env` (secrets; restrict permissions)
-- `/opt/hl-carry-bot/data/hl-carry-bot.db` (state)
+- `/etc/hl-carry-bot/config.yaml` (config)
+- `/etc/hl-carry-bot/hl-carry-bot.env` (secrets; restrict permissions)
+- `/var/lib/hl-carry-bot/hl-carry-bot.db` (state, via `StateDirectory=hl-carry-bot`)
+
+Quick setup:
+```bash
+sudo install -m 755 -d /opt/hl-carry-bot /etc/hl-carry-bot
+sudo install -m 600 scripts/systemd/hl-carry-bot.env.example /etc/hl-carry-bot/hl-carry-bot.env
+sudo install -m 644 internal/config/config.yaml /etc/hl-carry-bot/config.yaml
+sudo install -m 644 scripts/systemd/hl-carry-bot.service /etc/systemd/system/hl-carry-bot.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now hl-carry-bot
+```
+
+Remember to update `/etc/hl-carry-bot/config.yaml`:
+- Set `state.sqlite_path` to `/var/lib/hl-carry-bot/hl-carry-bot.db`.
+- Tune `strategy.perp_asset`, `strategy.spot_asset`, and `strategy.notional_usd`.
+
+Repo-based unit (development):
+- Use `scripts/systemd/hl-carry-bot.repo.service` if you want systemd to read `.env` + `config.yaml` from a working copy.
+- Update the `WorkingDirectory`, `EnvironmentFile`, `ExecStart`, and `ReadWritePaths` values in that file to match your local repo path and user.
 
 Hardening tips:
 - Run as a dedicated user (`hlbot`) with minimal permissions.
-- Keep `.env` readable only by that user (`chmod 600`).
-- Consider an `EnvironmentFile=` directive in the unit to load secrets from a protected file.
+- Keep `/etc/hl-carry-bot/hl-carry-bot.env` readable only by that user (`chmod 600`).
+- The unit already uses `EnvironmentFile=` and `StateDirectory=`; avoid storing secrets in the repo or `/opt`.
 - Use log shipping for zap JSON logs (journald → your collector).
 
 Watch logs:
@@ -216,8 +288,6 @@ In practice, you must account for:
 
 For “unattended” production readiness, prioritize:
 - Live `userFunding` verification once the bot holds exposure across a funding event.
-- Telegram operator controls.
-- TimescaleDB + Grafana candlestick/position dashboards.
-- Systemd hardening and config management.
+- Grafana dashboards and alerting on top of TimescaleDB.
 
 See `docs/roadmap.md` and `docs/handoff.md`.

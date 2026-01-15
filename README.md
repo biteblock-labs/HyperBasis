@@ -50,6 +50,8 @@ The bot wires configuration + logging, reconciles account state at startup, cons
 - Funding receipts are polled via `userFunding` after each funding time and logged as "funding payment received".
 - Prometheus metrics are enabled by default on `127.0.0.1:9001` (`metrics.path` is `/metrics`); set `metrics.enabled` to false to disable.
 - Telegram Bot API alerts are available when `telegram.enabled` is true and `HL_TELEGRAM_TOKEN`/`HL_TELEGRAM_CHAT_ID` are set (from `.env` or environment).
+- Telegram operator controls can be enabled with `telegram.operator_enabled` and support `/status`, `/pause`, `/resume`, and `/risk` overrides (see `docs/ops_runbook.md`).
+- TimescaleDB persistence is available for OHLC + position snapshots when `timescale.enabled` is true (use `timescale.dsn` or `HL_TIMESCALE_DSN`).
 - Placeholder types are used where schemas are unknown.
 
 ## Testing

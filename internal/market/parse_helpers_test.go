@@ -114,6 +114,107 @@ func TestParseCandle(t *testing.T) {
 	}
 }
 
+func TestParseCandleOHLC(t *testing.T) {
+	payload := map[string]any{
+		"data": map[string]any{
+			"coin":     "ETH",
+			"interval": "1h",
+			"candle": map[string]any{
+				"t":      1710000000000,
+				"open":   "100.0",
+				"high":   "110.0",
+				"low":    "90.0",
+				"close":  "105.0",
+				"volume": "12.5",
+			},
+		},
+	}
+	candle, ok := parseCandleOHLC(payload)
+	if !ok {
+		t.Fatalf("expected candle parsed")
+	}
+	if candle.Asset != "ETH" {
+		t.Fatalf("expected asset ETH, got %s", candle.Asset)
+	}
+	if candle.Interval != "1h" {
+		t.Fatalf("expected interval 1h, got %s", candle.Interval)
+	}
+	if !closeEnough(candle.Open, 100.0) || !closeEnough(candle.High, 110.0) || !closeEnough(candle.Low, 90.0) || !closeEnough(candle.Close, 105.0) {
+		t.Fatalf("unexpected ohlc values")
+	}
+	if !closeEnough(candle.Volume, 12.5) {
+		t.Fatalf("expected volume 12.5, got %f", candle.Volume)
+	}
+	if candle.Start.IsZero() {
+		t.Fatalf("expected candle start time")
+	}
+}
+
+func TestParseCandleWS(t *testing.T) {
+	payload := map[string]any{
+		"channel": "candle",
+		"data": map[string]any{
+			"t": 1768334400000,
+			"T": 1768337999999,
+			"s": "ETH",
+			"i": "1h",
+			"o": "3215.8",
+			"c": "3215.7",
+			"h": "3219.3",
+			"l": "3208.5",
+			"v": "2710.7687",
+			"n": 2134,
+		},
+	}
+	asset, close, ok := parseCandle(payload)
+	if !ok {
+		t.Fatalf("expected candle parsed")
+	}
+	if asset != "ETH" {
+		t.Fatalf("expected asset ETH, got %s", asset)
+	}
+	if !closeEnough(close, 3215.7) {
+		t.Fatalf("expected close 3215.7, got %f", close)
+	}
+}
+
+func TestParseCandleOHLCWS(t *testing.T) {
+	payload := map[string]any{
+		"channel": "candle",
+		"data": map[string]any{
+			"t": 1768334400000,
+			"T": 1768337999999,
+			"s": "ETH",
+			"i": "1h",
+			"o": "3215.8",
+			"c": "3215.7",
+			"h": "3219.3",
+			"l": "3208.5",
+			"v": "2710.7687",
+			"n": 2134,
+		},
+	}
+	candle, ok := parseCandleOHLC(payload)
+	if !ok {
+		t.Fatalf("expected candle parsed")
+	}
+	if candle.Asset != "ETH" {
+		t.Fatalf("expected asset ETH, got %s", candle.Asset)
+	}
+	if candle.Interval != "1h" {
+		t.Fatalf("expected interval 1h, got %s", candle.Interval)
+	}
+	if !closeEnough(candle.Open, 3215.8) || !closeEnough(candle.High, 3219.3) || !closeEnough(candle.Low, 3208.5) || !closeEnough(candle.Close, 3215.7) {
+		t.Fatalf("unexpected ohlc values")
+	}
+	if !closeEnough(candle.Volume, 2710.7687) {
+		t.Fatalf("expected volume 2710.7687, got %f", candle.Volume)
+	}
+	if candle.Start.IsZero() {
+		t.Fatalf("expected candle start time")
+	}
+}
+
 func TestComputeVolatility(t *testing.T) {
 	flat := computeVolatility([]float64{100, 110, 121})
 	if flat != 0 {

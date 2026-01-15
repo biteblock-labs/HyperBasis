@@ -17,11 +17,20 @@ metrics:
   address: 127.0.0.1:9001
   path: /metrics
 
+timescale:
+  enabled: true
+  dsn: ""
+  schema: public
+  max_open_conns: 5
+  max_idle_conns: 5
+  conn_max_lifetime: 5m
+  queue_size: 256
+
 strategy:
   perp_asset: ETH
   spot_asset: UETH
-  notional_usd: 12
-  min_funding_rate: 0
+  notional_usd: 120
+  min_funding_rate: 1
   max_volatility: 1
   fee_bps: 0
   slippage_bps: 0
@@ -29,8 +38,6 @@ strategy:
   carry_buffer_usd: 0
   funding_confirmations: 1
   funding_dip_confirmations: 1
-  delta_band_usd: 5
-  min_exposure_usd: 10
   entry_interval: 30s
   entry_cooldown: 60s
   hedge_cooldown: 10s
@@ -48,8 +55,9 @@ risk:
   max_open_orders: 10
   min_margin_ratio: 0
   min_health_ratio: 0
-  max_market_age: 2m
-  max_account_age: 10m
 
 telegram:
   enabled: true
+  operator_enabled: true
+  operator_poll_interval: 3s
+  operator_allowed_user_ids: []

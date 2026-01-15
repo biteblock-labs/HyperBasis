@@ -37,11 +37,14 @@
   - ENTER flow uses timeouts + rollback with fill sizing based on WS `userFills` (REST `userFillsByTime` fallback at order close/timeout).
   - EXIT flow now mirrors ENTER safety: sizes from actual spot/perp exposure, skips dust below `strategy.min_exposure_usd`, waits for fills (cancel on timeout), closes the perp leg with reduce-only, and rolls back spot on failures/partial fills before marking DONE.
   - HEDGE_OK now rebalances delta with perp-only IOC orders when exposure drifts beyond `strategy.delta_band_usd`.
-  - Exit on funding dip is deferred within `strategy.exit_funding_guard` before `nextFundingTime` when predicted funding is positive (configurable via `strategy.exit_funding_guard_enabled`).
-  - Risk checks include margin/health thresholds and a connectivity kill switch that cancels open orders when market/account data goes stale.
-  - Metrics counters track kill switch events and entry/exit failures; Telegram Bot API alerts fire on kill switch and entry/exit failures when enabled.
-  - Prometheus metrics endpoint is enabled by default on `127.0.0.1:9001` (`/metrics`) and can be disabled via `metrics.enabled`.
-  - Exchange nonces are monotonic and persisted in SQLite (startup logs nonce key/seed; warn on persistence failure).
+- Exit on funding dip is deferred within `strategy.exit_funding_guard` before `nextFundingTime` when predicted funding is positive (configurable via `strategy.exit_funding_guard_enabled`).
+- Risk checks include margin/health thresholds and a connectivity kill switch that cancels open orders when market/account data goes stale.
+- Metrics counters track kill switch events and entry/exit failures; Telegram Bot API alerts fire on kill switch and entry/exit failures when enabled.
+- Telegram operator controls poll `getUpdates` and support `/status`, `/pause`, `/resume`, and `/risk show|set|reset`; operator commands are authorized by chat ID and optional user allowlist, and are audited to SQLite.
+- TimescaleDB persistence is available for OHLC + position snapshots (tables `market_ohlc`, `position_snapshots`), gated by `timescale.enabled`.
+- systemd unit hardened with `EnvironmentFile`, `StateDirectory`, and sandboxing settings; ops runbook documents `/etc/hl-carry-bot` and `/var/lib/hl-carry-bot` layout.
+- Prometheus metrics endpoint is enabled by default on `127.0.0.1:9001` (`/metrics`) and can be disabled via `metrics.enabled`.
+- Exchange nonces are monotonic and persisted in SQLite (startup logs nonce key/seed; warn on persistence failure).
   - Strategy snapshots (last action + exposure + last mids) are persisted in SQLite and loaded on startup to restore the state machine (avoids getting stuck in IDLE with exposure after restarts, and supports dust-aware flatness checks).
   - State machine recovers from EXIT -> HEDGE_OK when exposure remains but orders are gone.
   - `cmd/verify`: places a tiny signed spot IOC order using `.env` and auto-derived mid price.
@@ -49,7 +52,7 @@
   - `make test` and `make ci` (vet + staticcheck + deadcode).
 
 ## Current Gaps (Before Unattended Trading)
-1) Telegram operator controls (alerts only; no pause/resume/status or risk override commands yet).
+1) Build Grafana dashboards and provisioning for the TimescaleDB data.
 
 ## Commands (Local Dev)
 - Tests: `go test ./...`
@@ -74,8 +77,8 @@ Since then we wired WS `userFills` for entry fill sizing (REST fallback at close
 Telegram alerts are implemented via Bot API `sendMessage` and wired to kill switch + entry/exit events. `cmd/bot` loads `.env` at startup; `HL_TELEGRAM_TOKEN`/`HL_TELEGRAM_CHAT_ID` override config values, but `telegram.enabled` must be true in YAML (no env override for enabling).
 
 Next engineering goals (highest priority):
-1) Implement Telegram operator controls (status, pause/resume, safe runtime risk overrides with audit).
-2) Persist OHLC + position snapshots to TimescaleDB and build Grafana candlestick dashboards.
-3) Harden systemd unit and config management.
+1) Build Grafana dashboards/provisioning on top of TimescaleDB (`market_ohlc`, `position_snapshots`).
+2) Auto-derive config defaults (min_exposure_usd from exchange constraints, delta_band_usd from notional, risk max ages from intervals).
+3) Add dry-run and paper trading modes.
 
 Do not add heavy logging in hot paths; keep packages modular; add/update tests for all new behavior.

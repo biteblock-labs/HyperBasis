@@ -93,13 +93,7 @@ func parseCandle(payload map[string]any) (string, float64, bool) {
 	if !ok {
 		return "", 0, false
 	}
-	asset := stringFromAny(data["coin"])
-	if asset == "" {
-		asset = stringFromAny(data["symbol"])
-	}
-	if asset == "" {
-		asset = stringFromAny(data["asset"])
-	}
+	asset := stringFromMap(data, "coin", "symbol", "asset", "s")
 	candle := data
 	if nested, ok := data["candle"].(map[string]any); ok {
 		candle = nested
@@ -109,6 +103,50 @@ func parseCandle(payload map[string]any) (string, float64, bool) {
 		return "", 0, false
 	}
 	return asset, close, true
+}
+
+func parseCandleOHLC(payload map[string]any) (Candle, bool) {
+	data, ok := payload["data"].(map[string]any)
+	if !ok {
+		return Candle{}, false
+	}
+	asset := stringFromMap(data, "coin", "symbol", "asset", "s")
+	candle := data
+	if nested, ok := data["candle"].(map[string]any); ok {
+		candle = nested
+	}
+	open := floatFromMap(candle, "o", "open")
+	high := floatFromMap(candle, "h", "high")
+	low := floatFromMap(candle, "l", "low")
+	close := floatFromMap(candle, "c", "close", "cls", "price")
+	volume := floatFromMap(candle, "v", "volume", "vol")
+	interval := stringFromMap(data, "interval", "timeframe", "i")
+	if interval == "" {
+		interval = stringFromMap(candle, "interval", "timeframe", "i")
+	}
+	ts, ok := timeFromAny(candle["t"])
+	if !ok {
+		ts, ok = timeFromAny(candle["time"])
+	}
+	if !ok {
+		ts, ok = timeFromAny(candle["startTime"])
+	}
+	if !ok {
+		ts, _ = timeFromAny(data["t"])
+	}
+	if asset == "" || close == 0 {
+		return Candle{}, false
+	}
+	return Candle{
+		Asset:    asset,
+		Interval: interval,
+		Start:    ts,
+		Open:     open,
+		High:     high,
+		Low:      low,
+		Close:    close,
+		Volume:   volume,
+	}, true
 }
 
 func extractUniverseAndCtxs(payload any, ctxKey string) ([]any, []any) {

@@ -1,0 +1,16 @@
+apiVersion: 1
+
+datasources:
+  - name: TimescaleDB
+    type: postgres
+    access: proxy
+    url: ${GF_TIMESCALE_HOST}:${GF_TIMESCALE_PORT}
+    database: ${GF_TIMESCALE_DB}
+    user: ${GF_TIMESCALE_USER}
+    secureJsonData:
+      password: ${GF_TIMESCALE_PASSWORD}
+    jsonData:
+      database: ${GF_TIMESCALE_DB}
+      sslmode: ${GF_TIMESCALE_SSLMODE}
+      postgresVersion: 1400
+      timescaledb: true

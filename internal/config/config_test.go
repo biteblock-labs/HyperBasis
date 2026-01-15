@@ -1,6 +1,7 @@
 package config
 
 import (
+	"math"
 	"testing"
 	"time"
 )
@@ -73,6 +74,64 @@ func TestRiskDefaults(t *testing.T) {
 	}
 }
 
+func TestStrategyDerivedDefaults(t *testing.T) {
+	cfg := &Config{Strategy: StrategyConfig{PerpAsset: "BTC", SpotAsset: "UBTC", NotionalUSD: 200}}
+	applyDefaults(cfg)
+	if math.Abs(cfg.Strategy.DeltaBandUSD-10) > 1e-9 {
+		t.Fatalf("expected delta band 10, got %f", cfg.Strategy.DeltaBandUSD)
+	}
+	if cfg.Strategy.MinExposureUSD != minOrderValueUSD {
+		t.Fatalf("expected min exposure %f, got %f", minOrderValueUSD, cfg.Strategy.MinExposureUSD)
+	}
+}
+
+func TestStrategyDerivedDefaultsRespectMinimum(t *testing.T) {
+	cfg := &Config{Strategy: StrategyConfig{PerpAsset: "BTC", SpotAsset: "UBTC", NotionalUSD: 25}}
+	applyDefaults(cfg)
+	if cfg.Strategy.DeltaBandUSD != minDeltaBandUSD {
+		t.Fatalf("expected delta band %f, got %f", minDeltaBandUSD, cfg.Strategy.DeltaBandUSD)
+	}
+}
+
+func TestStrategyDerivedDefaultsRespectExplicitValues(t *testing.T) {
+	cfg := &Config{Strategy: StrategyConfig{
+		PerpAsset:      "BTC",
+		SpotAsset:      "UBTC",
+		NotionalUSD:    200,
+		DeltaBandUSD:   12,
+		MinExposureUSD: 15,
+	}}
+	applyDefaults(cfg)
+	if cfg.Strategy.DeltaBandUSD != 12 {
+		t.Fatalf("expected delta band 12, got %f", cfg.Strategy.DeltaBandUSD)
+	}
+	if cfg.Strategy.MinExposureUSD != 15 {
+		t.Fatalf("expected min exposure 15, got %f", cfg.Strategy.MinExposureUSD)
+	}
+}
+
+func TestRiskDefaultsDerivedFromIntervals(t *testing.T) {
+	cfg := &Config{
+		WS: WSConfig{
+			PingInterval: 30 * time.Second,
+		},
+		Strategy: StrategyConfig{
+			PerpAsset:             "BTC",
+			SpotAsset:             "UBTC",
+			NotionalUSD:           1,
+			EntryInterval:         40 * time.Second,
+			SpotReconcileInterval: 7 * time.Minute,
+		},
+	}
+	applyDefaults(cfg)
+	if cfg.Risk.MaxMarketAge != 160*time.Second {
+		t.Fatalf("expected max market age 2m40s, got %v", cfg.Risk.MaxMarketAge)
+	}
+	if cfg.Risk.MaxAccountAge != 14*time.Minute {
+		t.Fatalf("expected max account age 14m, got %v", cfg.Risk.MaxAccountAge)
+	}
+}
+
 func TestMetricsDefaults(t *testing.T) {
 	cfg := &Config{Strategy: StrategyConfig{PerpAsset: "BTC", SpotAsset: "UBTC", NotionalUSD: 1}}
 	applyDefaults(cfg)
@@ -84,6 +143,20 @@ func TestMetricsDefaults(t *testing.T) {
 	}
 	if cfg.Metrics.Path != "/metrics" {
 		t.Fatalf("expected metrics path default, got %q", cfg.Metrics.Path)
+	}
+}
+
+func TestTimescaleDefaults(t *testing.T) {
+	cfg := &Config{Strategy: StrategyConfig{PerpAsset: "BTC", SpotAsset: "UBTC", NotionalUSD: 1}}
+	applyDefaults(cfg)
+	if cfg.Timescale.Schema == "" {
+		t.Fatalf("expected timescale schema default")
+	}
+	if cfg.Timescale.QueueSize <= 0 {
+		t.Fatalf("expected timescale queue size default, got %d", cfg.Timescale.QueueSize)
+	}
+	if cfg.Timescale.MaxOpenConns == 0 {
+		t.Fatalf("expected timescale max open conns default")
 	}
 }
 
@@ -245,6 +318,110 @@ func TestTelegramEnvOverridesConfig(t *testing.T) {
 	}
 	if err := validate(cfg); err != nil {
 		t.Fatalf("expected valid config with env overrides, got %v", err)
+	}
+}
+
+func TestTimescaleEnvOverride(t *testing.T) {
+	t.Setenv("HL_TIMESCALE_DSN", "postgres://user:pass@localhost:5432/db")
+	cfg := &Config{
+		Timescale: TimescaleConfig{
+			Enabled: true,
+			DSN:     "config-dsn",
+		},
+		Strategy: StrategyConfig{
+			PerpAsset:   "BTC",
+			SpotAsset:   "UBTC",
+			NotionalUSD: 1,
+		},
+	}
+	applyDefaults(cfg)
+	applyEnvOverrides(cfg)
+	if cfg.Timescale.DSN != "postgres://user:pass@localhost:5432/db" {
+		t.Fatalf("expected env timescale dsn override, got %q", cfg.Timescale.DSN)
+	}
+}
+
+func TestTelegramOperatorDefaults(t *testing.T) {
+	cfg := &Config{Strategy: StrategyConfig{PerpAsset: "BTC", SpotAsset: "UBTC", NotionalUSD: 1}}
+	applyDefaults(cfg)
+	if cfg.Telegram.OperatorPollInterval <= 0 {
+		t.Fatalf("expected operator poll interval default, got %v", cfg.Telegram.OperatorPollInterval)
+	}
+}
+
+func TestValidateRejectsOperatorEnabledWithoutTelegram(t *testing.T) {
+	cfg := &Config{
+		Telegram: TelegramConfig{
+			Enabled:         false,
+			OperatorEnabled: true,
+			Token:           "token",
+			ChatID:          "123",
+		},
+		Strategy: StrategyConfig{
+			PerpAsset:   "BTC",
+			SpotAsset:   "UBTC",
+			NotionalUSD: 1,
+		},
+	}
+	applyDefaults(cfg)
+	if err := validate(cfg); err == nil {
+		t.Fatalf("expected error for operator enabled without telegram enabled")
+	}
+}
+
+func TestValidateRejectsOperatorEnabledWithNonNumericChatID(t *testing.T) {
+	cfg := &Config{
+		Telegram: TelegramConfig{
+			Enabled:         true,
+			OperatorEnabled: true,
+			Token:           "token",
+			ChatID:          "@channel",
+		},
+		Strategy: StrategyConfig{
+			PerpAsset:   "BTC",
+			SpotAsset:   "UBTC",
+			NotionalUSD: 1,
+		},
+	}
+	applyDefaults(cfg)
+	if err := validate(cfg); err == nil {
+		t.Fatalf("expected error for non-numeric chat_id with operator enabled")
+	}
+}
+
+func TestValidateRejectsTimescaleEnabledWithoutDSN(t *testing.T) {
+	cfg := &Config{
+		Timescale: TimescaleConfig{
+			Enabled: true,
+		},
+		Strategy: StrategyConfig{
+			PerpAsset:   "BTC",
+			SpotAsset:   "UBTC",
+			NotionalUSD: 1,
+		},
+	}
+	applyDefaults(cfg)
+	if err := validate(cfg); err == nil {
+		t.Fatalf("expected error for missing timescale dsn")
+	}
+}
+
+func TestValidateRejectsTimescaleSchema(t *testing.T) {
+	cfg := &Config{
+		Timescale: TimescaleConfig{
+			Enabled: true,
+			DSN:     "postgres://user:pass@localhost:5432/db",
+			Schema:  "bad-schema",
+		},
+		Strategy: StrategyConfig{
+			PerpAsset:   "BTC",
+			SpotAsset:   "UBTC",
+			NotionalUSD: 1,
+		},
+	}
+	applyDefaults(cfg)
+	if err := validate(cfg); err == nil {
+		t.Fatalf("expected error for invalid timescale schema")
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"hl-carry-bot/internal/account"
@@ -27,6 +28,7 @@ import (
 	persist "hl-carry-bot/internal/state"
 	"hl-carry-bot/internal/state/sqlite"
 	"hl-carry-bot/internal/strategy"
+	"hl-carry-bot/internal/timescale"
 
 	"go.uber.org/zap"
 )
@@ -34,7 +36,7 @@ import (
 type App struct {
 	cfg           *config.Config
 	log           *zap.Logger
-	store         *sqlite.Store
+	store         persist.Store
 	rest          *rest.Client
 	ws            *ws.Client
 	exchange      *exchange.Client
@@ -45,6 +47,7 @@ type App struct {
 	metricsServer *http.Server
 	metricsAddr   string
 	metricsPath   string
+	timescale     *timescale.Writer
 	alerts        *alerts.Telegram
 	strategy      *strategy.StateMachine
 
@@ -59,6 +62,10 @@ type App struct {
 	hedgeCooldownUntil      time.Time
 	lastFundingReceiptCheck time.Time
 	lastFundingReceiptAt    time.Time
+	operatorWarned          bool
+	opsMu                   sync.RWMutex
+	paused                  bool
+	riskOverride            *config.RiskConfig
 }
 
 const (
@@ -130,6 +137,10 @@ func New(cfg *config.Config, log *zap.Logger) (*App, error) {
 		}
 	}
 	alertsClient := alerts.NewTelegram(cfg.Telegram, log)
+	timescaleWriter, err := timescale.New(cfg.Timescale, log)
+	if err != nil {
+		return nil, err
+	}
 	return &App{
 		cfg:           cfg,
 		log:           log,
@@ -144,6 +155,7 @@ func New(cfg *config.Config, log *zap.Logger) (*App, error) {
 		metricsServer: metricsServer,
 		metricsAddr:   metricsAddr,
 		metricsPath:   metricsPath,
+		timescale:     timescaleWriter,
 		alerts:        alertsClient,
 		strategy:      strategy.NewStateMachine(),
 	}, nil
@@ -151,6 +163,10 @@ func New(cfg *config.Config, log *zap.Logger) (*App, error) {
 
 func (a *App) Run(ctx context.Context) error {
 	defer a.store.Close()
+	if a.timescale != nil {
+		a.timescale.Start(ctx)
+		defer a.timescale.Close()
+	}
 	a.startMetricsServer(ctx)
 	if a.exchange != nil && a.store != nil {
 		if err := a.exchange.InitNonceStore(ctx, a.store); err != nil {
@@ -233,6 +249,7 @@ func (a *App) Run(ctx context.Context) error {
 	if a.log != nil {
 		a.log.Info("startup: complete")
 	}
+	a.startOperator(ctx)
 
 	ticker := time.NewTicker(a.cfg.Strategy.EntryInterval)
 	defer ticker.Stop()
@@ -320,6 +337,7 @@ func (a *App) tick(ctx context.Context) error {
 	now := time.Now().UTC()
 	entryCooldownActive := a.entryCooldownActive(now)
 	hedgeCooldownActive := a.hedgeCooldownActive(now)
+	paused := a.isPaused()
 	forecast, hasForecast := a.market.FundingForecast(perpAsset)
 	forecastAge := time.Duration(0)
 	if hasForecast && !forecast.ObservedAt.IsZero() {
@@ -382,6 +400,7 @@ func (a *App) tick(ctx context.Context) error {
 			zap.Duration("account_age", accountAge),
 			zap.Bool("entry_cooldown_active", entryCooldownActive),
 			zap.Bool("hedge_cooldown_active", hedgeCooldownActive),
+			zap.Bool("paused", paused),
 		}
 		fields = append(fields, extra...)
 		a.log.Debug("tick", fields...)
@@ -400,7 +419,8 @@ func (a *App) tick(ctx context.Context) error {
 			state = a.strategy.State
 		}
 	}
-	if err := a.checkConnectivity(ctx, accountSnap.OpenOrders, marketAge, accountAge); err != nil {
+	a.recordTimescale(state, snap, spotExposureUSD, perpExposureUSD, deltaUSD)
+	if err := a.checkConnectivity(ctx, a.riskConfig(), accountSnap.OpenOrders, marketAge, accountAge); err != nil {
 		logTick("skip_connectivity", zap.Error(err))
 		return nil
 	}
@@ -410,7 +430,7 @@ func (a *App) tick(ctx context.Context) error {
 			return nil
 		}
 	}
-	if err := strategy.CheckRisk(a.cfg.Risk, snap); err != nil {
+	if err := strategy.CheckRisk(a.riskConfig(), snap); err != nil {
 		a.log.Warn("risk check failed", zap.Error(err))
 		logTick("skip_risk", zap.Error(err))
 		return nil
@@ -418,6 +438,10 @@ func (a *App) tick(ctx context.Context) error {
 
 	switch state {
 	case strategy.StateIdle:
+		if paused {
+			logTick("paused")
+			return nil
+		}
 		enterSignal := fundingOKConfirmed && vol <= a.cfg.Strategy.MaxVolatility
 		if enterSignal && entryCooldownActive {
 			logTick("skip_entry_cooldown", zap.Bool("enter_signal", enterSignal), zap.Bool("funding_confirmed", fundingOKConfirmed))
@@ -439,6 +463,10 @@ func (a *App) tick(ctx context.Context) error {
 			return a.enterPosition(ctx, snap)
 		}
 	case strategy.StateHedgeOK:
+		if paused {
+			logTick("paused")
+			return nil
+		}
 		exitSignal := a.cfg.Strategy.ExitOnFundingDip && fundingBadConfirmed
 		exitGuarded := false
 		timeToFunding := time.Duration(0)
@@ -576,11 +604,11 @@ func (a *App) startSpotReconciler(ctx context.Context) {
 	}()
 }
 
-func (a *App) checkConnectivity(ctx context.Context, openOrders []map[string]any, marketAge, accountAge time.Duration) error {
+func (a *App) checkConnectivity(ctx context.Context, risk config.RiskConfig, openOrders []map[string]any, marketAge, accountAge time.Duration) error {
 	if a.cfg == nil {
 		return nil
 	}
-	err := strategy.CheckConnectivity(a.cfg.Risk, marketAge, accountAge)
+	err := strategy.CheckConnectivity(risk, marketAge, accountAge)
 	if err == nil {
 		if a.killSwitchActive {
 			a.killSwitchActive = false

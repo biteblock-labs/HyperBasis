@@ -906,7 +906,7 @@ func TestConnectivityKillSwitchRetriesCancel(t *testing.T) {
 		metrics:  metricsStub,
 	}
 	openOrders := []map[string]any{{"oid": "1", "asset": 1}}
-	if err := app.checkConnectivity(context.Background(), openOrders, 2*time.Second, 0); err == nil {
+	if err := app.checkConnectivity(context.Background(), app.riskConfig(), openOrders, 2*time.Second, 0); err == nil {
 		t.Fatalf("expected connectivity error")
 	}
 	if !app.killSwitchActive {
@@ -918,7 +918,7 @@ func TestConnectivityKillSwitchRetriesCancel(t *testing.T) {
 	if counters.killEngaged.count != 1 {
 		t.Fatalf("expected kill switch engaged count 1, got %d", counters.killEngaged.count)
 	}
-	if err := app.checkConnectivity(context.Background(), openOrders, 2*time.Second, 0); err == nil {
+	if err := app.checkConnectivity(context.Background(), app.riskConfig(), openOrders, 2*time.Second, 0); err == nil {
 		t.Fatalf("expected connectivity error on retry")
 	}
 	if got := len(stub.cancels); got != 2 {
@@ -939,11 +939,11 @@ func TestConnectivityKillSwitchRestores(t *testing.T) {
 		metrics:  metricsStub,
 	}
 	openOrders := []map[string]any{{"oid": "1", "asset": 1}}
-	_ = app.checkConnectivity(context.Background(), openOrders, 2*time.Second, 0)
+	_ = app.checkConnectivity(context.Background(), app.riskConfig(), openOrders, 2*time.Second, 0)
 	if !app.killSwitchActive {
 		t.Fatalf("expected kill switch active")
 	}
-	if err := app.checkConnectivity(context.Background(), openOrders, 0, 0); err != nil {
+	if err := app.checkConnectivity(context.Background(), app.riskConfig(), openOrders, 0, 0); err != nil {
 		t.Fatalf("expected connectivity restored, got %v", err)
 	}
 	if app.killSwitchActive {

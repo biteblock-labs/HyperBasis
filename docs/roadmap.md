@@ -142,8 +142,8 @@ If exposure exists and funding is bad: exit.
 - [x] Phase 5: Expand structured logging fields.
 - [x] Phase 5: Add metrics counters and alert routing.
 - [x] Phase 5: Implement Telegram alert transport (Bot API sendMessage, gated by `telegram.enabled`).
-- [ ] Phase 6: Harden systemd unit and config management.
-- [ ] Phase 6: Telegram operator controls (status, pause/resume, safe runtime risk overrides with atomic apply + audit).
+- [x] Phase 6: Harden systemd unit and config management.
+- [x] Phase 6: Telegram operator controls (status, pause/resume, safe runtime risk overrides with atomic apply + audit).
 - [ ] Phase 6: Persist OHLC + position snapshots to TimescaleDB and build Grafana candlestick dashboards (ECharts/Plotly).
 - [ ] Phase 6: Auto-derive config defaults (min_exposure_usd from exchange constraints, delta_band_usd from notional, risk max ages from intervals).
 - [ ] Phase 6: Add dry-run and paper trading modes.
